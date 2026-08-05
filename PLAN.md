@@ -36,8 +36,12 @@ whose `PLAN.md` entry is missing is not done.
 ## Current state
 
 **Phase:** 0 — Foundation
-**Active tasks:** none
-**Next up:** F-05 fix round → whole-branch review → Phase 0 PR
+**Active tasks:** whole-branch review
+**Next up:** Phase 0 PR against `main`, then I-01
+
+**Phase 0 is code-complete.** All six `SPEC.md` tasks plus two composer-created reconciliation
+tasks are `DONE` and merged into `phase/0-foundation`. `pnpm verify` is green: 214 tests across
+9 files, typecheck and lint clean.
 **Rolling 30-day projected spend:** $0.00 (ceiling: $70.00)
 
 **Phase 0 dispatch order:** F-01 → F-06 → **(F-02 ∥ F-03)** → **(F-04 ∥ F-05)** → final
@@ -66,7 +70,7 @@ a time with `pnpm verify` re-run after each merge.
 | F-03 | Config and secrets | DONE | F-01, F-06 | — | `201080d` (1 fix round) |
 | R-01 | Reconcile `drizzle.config.ts` with the `process.env` ban | DONE | F-02, F-03 | — | `964c65e` — composer-created; merge fallout, not a `SPEC.md` task |
 | F-04 | `lib/net.ts` | DONE | F-01, F-03, F-06 | — | `e18bf90` — review clean first pass |
-| F-05 | `lib/llm.ts` + `lib/budget.ts` | REVIEW | F-01, F-02, F-03, F-06 | — | `f0d2ddd` — fix round 1 in flight |
+| F-05 | `lib/llm.ts` + `lib/budget.ts` | DONE | F-01, F-02, F-03, F-06 | — | `f8ed738` (1 fix round) |
 | R-02 | Derive `allowDefaultProject` from disk state | DONE | F-04, F-05 | — | `5f00237` — composer-created; unblocks the whole repo's lint |
 | F-06 | Error taxonomy and logging | DONE | F-01 | — | `e76b023` (1 fix round) |
 
