@@ -39,7 +39,7 @@ Drizzle schema and initial migration. Tables: `documents` (append-only, unique o
 `scores`, `briefs`, `runs`. Enable pgvector.
 
 Criteria:
-- Migration applies cleanly to an empty Postgres 16 database and rolls forward only.
+- Migration applies cleanly to an empty Postgres 18 database and rolls forward only.
 - `documents` has a unique constraint on `(source, source_id)` and no `UPDATE` path in
   the codebase.
 - Every derived table has a non-null `source_document_ids` array or a foreign key chain

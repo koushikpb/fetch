@@ -54,7 +54,7 @@ web/              Next.js UI, ranked table, drill-down to evidence
 | Language | TypeScript, strict | One language end to end; subagents never context-switch |
 | Runtime | Node 22 LTS | |
 | Web | Next.js 15, App Router | |
-| Database | Postgres 16 + pgvector | Storage and clustering in one system |
+| Database | Postgres 18 + pgvector | Storage and clustering in one system |
 | ORM | Drizzle | Diffable migrations, which matters for agent review |
 | Queue | pg-boss | Postgres-backed; no additional infrastructure |
 | Tests | Vitest | |
