@@ -37,8 +37,11 @@ whose `PLAN.md` entry is missing is not done.
 
 **Phase:** 0 — Foundation
 **Active tasks:** none
-**Next up:** F-01
+**Next up:** F-06
 **Rolling 30-day projected spend:** $0.00 (ceiling: $70.00)
+
+**Phase 0 dispatch order:** F-01 → F-06 → F-03 → F-02 → F-04 → F-05. This differs from
+the `SPEC.md` blocker graph; see the decisions log entries dated 2026-08-04 for why.
 
 ---
 
@@ -48,12 +51,12 @@ whose `PLAN.md` entry is missing is not done.
 
 | ID | Task | Status | Blockers | Assigned | Notes |
 |---|---|---|---|---|---|
-| F-01 | Repo scaffold and tooling | READY | — | — | |
-| F-02 | Database schema and migrations | TODO | F-01 | — | |
-| F-03 | Config and secrets | TODO | F-01 | — | |
-| F-04 | `lib/net.ts` | TODO | F-01, F-03 | — | Gates all of Phase 1 |
-| F-05 | `lib/llm.ts` + `lib/budget.ts` | TODO | F-01, F-03 | — | Gates all of Phase 2 |
-| F-06 | Error taxonomy and logging | TODO | F-01 | — | |
+| F-01 | Repo scaffold and tooling | DONE | — | — | `e5814f1` |
+| F-02 | Database schema and migrations | READY | F-01 | — | Dispatch 4th — F-05 needs `runs` |
+| F-03 | Config and secrets | READY | F-01, F-06 | — | Dispatch 3rd |
+| F-04 | `lib/net.ts` | TODO | F-01, F-03, F-06 | — | Gates all of Phase 1 |
+| F-05 | `lib/llm.ts` + `lib/budget.ts` | TODO | F-01, F-02, F-03, F-06 | — | Gates all of Phase 2 |
+| F-06 | Error taxonomy and logging | READY | F-01 | — | Dispatch 2nd — binds F-02/03/04/05 |
 
 ### Phase 1 — Ingestion
 
@@ -148,6 +151,10 @@ don't relitigate them.*
 | — | Single language (TypeScript) end to end | Subagents are stateless; context-switching languages mid-project raises defect rate |
 | — | Embedding prefilter mandatory before any LLM call | ~10× cost difference between filtered and unfiltered pipelines |
 | — | Opus never called at runtime | Composer-only model; runtime routing is Haiku extract / Sonnet synthesize |
+| 2026-08-04 | F-02 added as an implicit blocker of F-05 | F-05's criterion requires every model call to record tokens and cost "to `runs`". The `runs` table is created by F-02. Building F-05 first would mean writing token accounting against a table that does not exist |
+| 2026-08-04 | F-06 added as a blocker of F-03, F-04, F-05; dispatched second | F-06's criterion is repo-wide — "every thrown error in the repo is an instance of a class from `lib/errors.ts`". Config, net, and llm all throw. Building the taxonomy after them guarantees rework |
+| 2026-08-04 | Node 22 pinned via Homebrew `node@22`; no `use-node-version` in `.npmrc` | pnpm 11 imports `node:sqlite` and refuses to start on Node < 22.13, so the toolchain self-enforces the pin. A second version declaration would be a redundant source of truth |
+| 2026-08-04 | `O-04` in the F-01 spec text read as a typo for `O-03` | No task `O-04` exists anywhere; `O-03 — Cost projection in verify` is described in `PLAN.md` as replacing the F-01 stub |
 
 ---
 
@@ -165,6 +172,23 @@ don't relitigate them.*
 ```
 
 ---
+
+### 2026-08-04 — F-01 DONE
+**Summary:** pnpm workspace, strict TypeScript, ESLint, Prettier, Vitest, Node 22 pin,
+directory skeleton, and the `verify` gate scaffolded.
+**Files:** package.json, pnpm-lock.yaml, tsconfig.json, eslint.config.js, vitest.config.ts,
+.prettierrc.json, .prettierignore, .gitignore, scripts/cost-projection.ts,
+tests/eslint-rules.test.ts, and placeholder `types.ts` in all 12 architecture directories
+**Criteria:** all four MET. `pnpm install && pnpm verify` passes from a clean checkout
+(reviewer independently reproduced it); `strict` and `noUncheckedIndexedAccess` both set;
+the three ESLint prohibitions are proven behaviourally by `tests/eslint-rules.test.ts`,
+which asserts on real `lintText` rule IDs rather than on config shape.
+**Cost impact:** none — cost projection is the `O-03` stub, prints $0.00.
+**Follow-ups:** Two deferred minors, both non-blocking — a new `ESLint` instance is
+constructed per test, and `format`/`format:check` scripts are unrequested surface area.
+`typescript` is pinned to `^5.9.3` because `typescript-eslint@8.66.0` caps at `<6.1.0`
+while TypeScript's `latest` is now `7.0.2`; a future TypeScript bump must re-check that
+peer range or lint breaks.
 
 ### — Project initialized
 **Summary:** `CLAUDE.md`, `SPEC.md`, and `PLAN.md` created. Phase 0 open, F-01 `READY`.
