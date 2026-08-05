@@ -1,49 +1,46 @@
 // Types specific to the Reddit adapter (OAuth, free tier, 100 QPM).
 //
-// `NetClient`'s type is not defined in lib/types.ts, so importing it below reads like the
-// cross-directory type import CLAUDE.md's "no cross-directory type imports except from
-// lib/types.ts" convention forbids. It isn't the coupling that convention targets, for the
-// same reason sources/types.ts's own import of `AppError` from lib/errors.ts isn't (see that
-// file's header comment): `NetClient` is not a shared *data shape* that sources/, ingest/,
-// and db/ all need one common definition of — it is the mandated single path for outbound
-// HTTP (CLAUDE.md: "All outbound network calls go through lib/net.ts"), which every module
-// making a network call is expected to reference directly, the same way this file (and
-// ./auth.ts, ./http.ts) reference `AppError` from lib/errors.ts directly.
+// `NetClient` is imported across directories deliberately: it is not a shared data shape the
+// "no cross-directory type imports except from lib/types.ts" convention targets, but the
+// mandated single path for outbound HTTP, which every network-calling module references
+// directly — the same exception sources/types.ts's own header records for `AppError`.
 import type { NetClient } from '../../lib/net.js';
 import type { FetchPage } from '../types.js';
 
 export interface RedditCommentExpansionOptions {
   /**
-   * Levels of nested replies to walk past the top-level comment itself. Also sent as
-   * Reddit's own `depth` query param, so the server does most of the bounding; the
-   * client-side walk in ./mapping.ts enforces the same ceiling regardless of what the
-   * server actually returns, and never issues a further request to expand a `kind: "more"`
-   * stub — that is what keeps comment expansion to exactly one request per qualifying
-   * thread (composer resolution 5: "unbounded expansion on a large thread is how you burn
-   * 100 QPM in seconds").
+   * Total comment levels kept, *counting the top-level comments as the first level*:
+   * `maxDepth: 1` keeps top-level comments only, `2` keeps top-level plus their direct
+   * replies. This matches Reddit's own `depth` query param, which the same number is sent
+   * as — the client-side walk in ./mapping.ts re-enforces the ceiling so the bound holds
+   * even if the server ignores it, and a `kind: "more"` stub is skipped rather than
+   * expanded with a further request, which is what keeps expansion to exactly one HTTP
+   * request per qualifying thread.
    */
   readonly maxDepth: number;
   /**
-   * Comments kept per level (top-level and every nested level alike), highest score first
-   * (`sort=top`). Also sent as Reddit's own `limit` query param on the comments request.
+   * Comments kept per *sibling group* — the top-level list, and separately each reply list
+   * under a kept comment — highest score first (`sort=top`). The per-group budget resets on
+   * each group, so one thread yields up to `maxBreadth` top-level comments plus `maxBreadth`
+   * more under each of them: 30 documents at the defaults (breadth 5, depth 2), not 10. Also
+   * sent as Reddit's own `limit` query param on the comments request.
    */
   readonly maxBreadth: number;
   /** A post needs at least this many comments (its own `num_comments`) before expansion
-   *  spends a request on it at all. */
+   *  spends a request on it at all. This is the knob that decides a listing page's request
+   *  cost: at 1, every post with a single comment costs a request, so a 25-post page costs
+   *  ~26 against a 100 QPM ceiling. */
   readonly minCommentsToExpand: number;
 }
 
 export type RedditTopTimeWindow = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
 
 export interface RedditAdapterOptions {
-  // Auth fields are individually optional so `createRedditAdapter()` with no arguments
-  // still constructs cleanly — composer resolution 1: adapters take configuration as
-  // factory parameters with sensible defaults, and wiring real credentials from
-  // lib/config.ts's validated Config is I-05's job, not this task's. A construction-time
-  // throw here would be reachable the moment sources/registry.ts's array literal is
-  // evaluated (at module load, before any run exists to report a blocker against), so the
-  // absence of credentials is reported lazily instead: fetchIncremental/fetchBackfill throw
-  // ConfigError and checkHealth reports `healthy: false`, both only when actually invoked.
+  // Individually optional so `createRedditAdapter()` constructs cleanly with no arguments: a
+  // construction-time throw would fire when sources/registry.ts's array literal is evaluated
+  // at module load, before any run exists to report it against. Missing credentials surface
+  // lazily instead — fetchIncremental/fetchBackfill throw `ConfigError`, checkHealth reports
+  // `healthy: false`, both only when actually invoked.
   readonly clientId?: string;
   readonly clientSecret?: string;
   readonly userAgent?: string;

@@ -1,0 +1,52 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_nextpage",
+    "before": null,
+    "dist": 3,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "identifier": "hhh888",
+          "fullname": "t3_hhh888",
+          "heading": "A post whose per-item fields have been renamed upstream",
+          "text": "Nothing here matches the field names this adapter maps.",
+          "author": "renamed_shape_poster",
+          "created_at_utc": 1740900000,
+          "score": 12,
+          "num_comments": 4,
+          "subreddit": "shapechange"
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "identifier": "iii999",
+          "fullname": "t3_iii999",
+          "heading": "A second post with the same renamed shape",
+          "text": "Also unmappable.",
+          "author": "renamed_shape_poster_two",
+          "created_at_utc": 1740900600,
+          "score": 3,
+          "num_comments": 1,
+          "subreddit": "shapechange"
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "identifier": "jjj000",
+          "fullname": "t3_jjj000",
+          "heading": "A third post with the same renamed shape",
+          "text": "Also unmappable.",
+          "author": "renamed_shape_poster_three",
+          "created_at_utc": 1740901200,
+          "score": 1,
+          "num_comments": 0,
+          "subreddit": "shapechange"
+        }
+      }
+    ]
+  }
+}

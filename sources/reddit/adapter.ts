@@ -2,9 +2,16 @@
 // `top` listings, and bounded comment expansion on qualifying threads. See ./types.ts,
 // ./auth.ts, ./http.ts, and ./mapping.ts for the pieces this file assembles.
 import { netClient as sharedNetClient, type NetClient } from '../../lib/net.js';
-import { AppError, ConfigError, UpstreamError } from '../../lib/errors.js';
+import { AppError, ConfigError, RateLimitError, UpstreamError } from '../../lib/errors.js';
+import { log } from '../../lib/log.js';
 import type { Document } from '../../lib/types.js';
-import type { BackfillRange, Cursor, HealthCheckResult, SourceAdapter } from '../types.js';
+import type {
+  BackfillRange,
+  Cursor,
+  FetchPageOutcome,
+  HealthCheckResult,
+  SourceAdapter,
+} from '../types.js';
 import { createTokenManager, type TokenManager } from './auth.js';
 import { requestAuthed } from './http.js';
 import {
@@ -25,18 +32,32 @@ import type {
 const DEFAULT_SUBREDDITS: readonly string[] = [];
 const DEFAULT_POSTS_PER_PAGE = 25;
 const DEFAULT_TOP_TIME_WINDOW: RedditTopTimeWindow = 'day';
-// Conservative (composer resolution 5): 2 levels and 5 comments per level is enough to
-// surface a thread's most-upvoted workarounds/complaints without turning one popular post
-// into dozens of requests against a 100 QPM ceiling shared with every other subreddit and
-// listing this adapter is sweeping.
+// Expansion costs one request per qualifying post, so the qualifying threshold is what
+// decides how much of the 100 QPM ceiling a single listing page can spend: at
+// `minCommentsToExpand: 1`, a 25-post page costs ~26 requests. Requiring 5 comments keeps
+// the spend on threads carrying an actual discussion, and keeps a page's cost closer to the
+// listing request itself.
 const DEFAULT_COMMENT_EXPANSION: RedditCommentExpansionOptions = {
   maxDepth: 2,
   maxBreadth: 5,
-  minCommentsToExpand: 1,
+  minCommentsToExpand: 5,
 };
+
+// Above this share of a listing page failing to map, the page is reported `truncated`
+// rather than passed off as an ordinary (possibly empty) success. A handful of unmappable
+// children is normal — Reddit listings carry promoted and placeholder entries — but a
+// majority failing means the per-item shape moved under us, and silently returning fewer
+// documents while the cursor marches on is how a run reports clean success having ingested
+// nothing.
+const MAPPING_SHORTFALL_TRUNCATION_RATIO = 0.5;
 
 const LISTINGS = ['new', 'top'] as const;
 type Listing = (typeof LISTINGS)[number];
+
+interface SubredditListing {
+  readonly subreddit: string;
+  readonly listing: Listing;
+}
 
 function tryParseJson(text: string): unknown {
   try {
@@ -46,75 +67,139 @@ function tryParseJson(text: string): unknown {
   }
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function isListingName(value: unknown): value is Listing {
+  return typeof value === 'string' && (LISTINGS as readonly string[]).includes(value);
+}
+
+/** Where in a sweep a decoded cursor points: which entry of the configured list, and how far
+ *  into that entry's own pagination. */
+interface SweepPosition {
+  readonly index: number;
+  readonly after: string | null;
+}
+
 // --- Incremental cursor: round-robins every (subreddit, listing) pair -------------------
 
+// Keyed on the subreddit *name*, never its position in `options.subreddits`. I-05 wires that
+// list from configuration, so it will change between runs; an index-keyed cursor silently
+// resolves to a different subreddit when an entry is prepended, and hard-fails a bounds
+// check when one is removed.
 interface IncrementalCursorState {
-  readonly pairIndex: number;
+  readonly subreddit: string;
+  readonly listing: Listing;
   readonly after: string | null;
 }
 
 function isIncrementalCursorState(value: unknown): value is IncrementalCursorState {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
+  const record = asRecord(value);
   return (
-    typeof record.pairIndex === 'number' &&
+    record !== undefined &&
+    typeof record.subreddit === 'string' &&
+    isListingName(record.listing) &&
     (typeof record.after === 'string' || record.after === null)
   );
 }
 
-function encodeIncrementalCursor(state: IncrementalCursorState): Cursor {
+function encodeIncrementalCursor(pair: SubredditListing, after: string | null): Cursor {
+  const state: IncrementalCursorState = { subreddit: pair.subreddit, listing: pair.listing, after };
   return JSON.stringify(state);
 }
 
-function decodeIncrementalCursor(cursor: Cursor | undefined, pairCount: number): IncrementalCursorState {
+function resolveIncrementalPosition(
+  cursor: Cursor | undefined,
+  pairs: readonly SubredditListing[],
+): SweepPosition {
   if (cursor === undefined) {
-    return { pairIndex: 0, after: null };
+    return { index: 0, after: null };
   }
   const parsed = tryParseJson(cursor);
-  if (isIncrementalCursorState(parsed) && parsed.pairIndex >= 0 && parsed.pairIndex < pairCount) {
-    return parsed;
+  if (!isIncrementalCursorState(parsed)) {
+    // A cursor is opaque and adapter-minted (sources/types.ts's own doc comment) — I-05 only
+    // ever replays exactly what this adapter previously returned, so an unrecognizable one
+    // means either genuine corruption or a cross-wired call passing a backfill cursor in
+    // here. Either way it is a wiring bug worth surfacing loudly.
+    throw new ConfigError('Malformed Reddit incremental cursor', { context: { cursor } });
   }
-  // A cursor is opaque and adapter-minted (sources/types.ts's own doc comment) — I-05 only
-  // ever replays exactly what this adapter previously returned, so reaching this means
-  // either genuine corruption or a cross-wired call passing a backfill cursor in here (or
-  // vice versa). Either way it is a wiring bug worth surfacing loudly, not silently
-  // restarting from the beginning and re-fetching everything.
-  throw new ConfigError('Malformed or out-of-range Reddit incremental cursor', { context: { cursor } });
+  const index = pairs.findIndex(
+    (pair) => pair.subreddit === parsed.subreddit && pair.listing === parsed.listing,
+  );
+  if (index === -1) {
+    // A subreddit dropped from configuration between runs is a routine config edit, not a
+    // wiring bug — restarting the sweep re-fetches pages already seen (free, since ingest
+    // deduplicates on `(source, source_id)`) where throwing would hard-fail every run until
+    // someone manually cleared the stored cursor.
+    log.warn('Reddit cursor names a subreddit/listing that is no longer configured; restarting the sweep', {
+      source: 'reddit',
+      subreddit: parsed.subreddit,
+      listing: parsed.listing,
+    });
+    return { index: 0, after: null };
+  }
+  return { index, after: parsed.after };
+}
+
+function cursorForNextPair(
+  pairs: readonly SubredditListing[],
+  currentIndex: number,
+): Cursor | undefined {
+  const next = pairs[currentIndex + 1];
+  return next === undefined ? undefined : encodeIncrementalCursor(next, null);
 }
 
 // --- Backfill cursor: walks one subreddit's `new` listing at a time ---------------------
 
 interface BackfillCursorState {
-  readonly subredditIndex: number;
+  readonly subreddit: string;
   readonly after: string | null;
 }
 
 function isBackfillCursorState(value: unknown): value is BackfillCursorState {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
+  const record = asRecord(value);
   return (
-    typeof record.subredditIndex === 'number' &&
+    record !== undefined &&
+    typeof record.subreddit === 'string' &&
+    record.listing === undefined &&
     (typeof record.after === 'string' || record.after === null)
   );
 }
 
-function encodeBackfillCursor(state: BackfillCursorState): Cursor {
+function encodeBackfillCursor(subreddit: string, after: string | null): Cursor {
+  const state: BackfillCursorState = { subreddit, after };
   return JSON.stringify(state);
 }
 
-function decodeBackfillCursor(cursor: Cursor | undefined, subredditCount: number): BackfillCursorState {
+function resolveBackfillPosition(
+  cursor: Cursor | undefined,
+  subreddits: readonly string[],
+): SweepPosition {
   if (cursor === undefined) {
-    return { subredditIndex: 0, after: null };
+    return { index: 0, after: null };
   }
   const parsed = tryParseJson(cursor);
-  if (isBackfillCursorState(parsed) && parsed.subredditIndex >= 0 && parsed.subredditIndex < subredditCount) {
-    return parsed;
+  if (!isBackfillCursorState(parsed)) {
+    throw new ConfigError('Malformed Reddit backfill cursor', { context: { cursor } });
   }
-  throw new ConfigError('Malformed or out-of-range Reddit backfill cursor', { context: { cursor } });
+  const index = subreddits.indexOf(parsed.subreddit);
+  if (index === -1) {
+    log.warn('Reddit backfill cursor names a subreddit that is no longer configured; restarting the range', {
+      source: 'reddit',
+      subreddit: parsed.subreddit,
+    });
+    return { index: 0, after: null };
+  }
+  return { index, after: parsed.after };
+}
+
+function cursorForNextSubreddit(
+  subreddits: readonly string[],
+  currentIndex: number,
+): Cursor | undefined {
+  const next = subreddits[currentIndex + 1];
+  return next === undefined ? undefined : encodeBackfillCursor(next, null);
 }
 
 // --- Shared fetch machinery ---------------------------------------------------------------
@@ -126,6 +211,13 @@ interface FetchDeps {
   readonly commentExpansion: RedditCommentExpansionOptions;
 }
 
+interface ListingPageResult {
+  readonly posts: MappedPost[];
+  readonly nextAfter: string | null;
+  readonly headroom: RedditRateLimitHeadroom | undefined;
+  readonly truncatedReason: string | undefined;
+}
+
 async function fetchListingPage(
   subreddit: string,
   listing: Listing,
@@ -133,7 +225,7 @@ async function fetchListingPage(
   postsPerPage: number,
   topTimeWindow: RedditTopTimeWindow,
   deps: FetchDeps,
-): Promise<{ posts: MappedPost[]; nextAfter: string | null; headroom: RedditRateLimitHeadroom | undefined }> {
+): Promise<ListingPageResult> {
   const params = new URLSearchParams({ limit: String(postsPerPage), raw_json: '1' });
   if (after !== null) {
     params.set('after', after);
@@ -150,10 +242,16 @@ async function fetchListingPage(
     );
   }
   if (response.status === 403 || response.status === 404) {
-    // Private, banned, or nonexistent subreddit — a configuration fact about this one entry
-    // in `subreddits`, not a reason to fail the whole run. Reported as an exhausted, empty
-    // page so the caller's pairs/subreddits loop just moves on to the next configured entry.
-    return { posts: [], nextAfter: null, headroom };
+    // Private, banned, or nonexistent — a configuration fact about this one entry in
+    // `subreddits`, not a reason to fail the whole run, but reporting it as an ordinary
+    // empty page would make a typo'd name read as a permanently clean, permanently empty
+    // sweep. `truncated` is the vocabulary for "more may exist and no cursor reaches it".
+    return {
+      posts: [],
+      nextAfter: null,
+      headroom,
+      truncatedReason: `Reddit returned ${response.status} for r/${subreddit}/${listing} — private, banned, or nonexistent subreddit; nothing from it is reachable`,
+    };
   }
   if (!response.ok) {
     throw new UpstreamError(`Reddit listing r/${subreddit}/${listing} returned ${response.status}`, {
@@ -161,9 +259,30 @@ async function fetchListingPage(
     });
   }
   const json: unknown = await response.json();
-  const { children, after: nextAfter } = parseListingResponse(json, subreddit);
+  const { children, after: nextAfter, childCount } = parseListingResponse(json, subreddit);
   const posts = children.map((child) => toPostDocument(child)).filter((post): post is MappedPost => post !== undefined);
-  return { posts, nextAfter, headroom };
+
+  const skipped = childCount - posts.length;
+  if (skipped > 0) {
+    // Without this, a renamed per-item field drops every child, the page comes back empty,
+    // the cursor advances, and the run reports clean success having ingested nothing.
+    log.warn('Reddit listing items could not be mapped to Documents', {
+      source: 'reddit',
+      subreddit,
+      listing,
+      skipped,
+      total: childCount,
+    });
+  }
+  const shortfall = childCount > 0 && skipped / childCount >= MAPPING_SHORTFALL_TRUNCATION_RATIO;
+  return {
+    posts,
+    nextAfter,
+    headroom,
+    truncatedReason: shortfall
+      ? `${skipped} of ${childCount} items in r/${subreddit}/${listing} did not carry the fields this adapter maps — Reddit's per-item response shape may have changed`
+      : undefined,
+  };
 }
 
 async function fetchCommentDocuments(
@@ -189,7 +308,7 @@ async function fetchCommentDocuments(
   if (response.status === 403 || response.status === 404) {
     // The thread became unavailable between the listing call and this one (deleted post,
     // newly banned subreddit) — the post Document itself is still valid evidence; there is
-    // simply nothing to expand.
+    // simply nothing to expand, and re-fetching would not change that.
     return { documents: [], headroom };
   }
   if (!response.ok) {
@@ -210,11 +329,10 @@ interface ExpansionResult {
 }
 
 /**
- * Expands every qualifying post's comment thread in sequence — the fan-out composer
- * resolution 5 describes. A thread that fails mid-sequence stops expansion there and
- * returns everything already collected (earlier threads' comments, plus every post
- * Document, added by the caller) alongside the `AppError` that stopped it, rather than
- * losing already-fetched documents to a rejected Promise.
+ * One failed thread costs one thread, not the rest of the page: expansion continues through
+ * the remaining qualifying posts and reports the first failure afterwards. A `RateLimitError`
+ * is the one exception — continuing past it would only deepen the violation the bucket is
+ * already reporting, so expansion stops there.
  */
 async function expandQualifyingThreads(
   posts: readonly MappedPost[],
@@ -223,6 +341,7 @@ async function expandQualifyingThreads(
 ): Promise<ExpansionResult> {
   const documents: Document[] = [];
   let headroom: RedditRateLimitHeadroom | undefined;
+  let firstError: AppError | undefined;
   for (const post of posts) {
     if (post.numComments < deps.commentExpansion.minCommentsToExpand) {
       continue;
@@ -232,25 +351,58 @@ async function expandQualifyingThreads(
       documents.push(...result.documents);
       headroom = result.headroom ?? headroom;
     } catch (err) {
-      if (err instanceof AppError) {
+      if (!(err instanceof AppError)) {
+        throw err;
+      }
+      log.warn('Reddit comment expansion failed for a thread; this page will be re-fetched rather than skipped', {
+        source: 'reddit',
+        subreddit,
+        post_id: post.postId36,
+        error: err,
+      });
+      if (err instanceof RateLimitError) {
         return { documents, headroom, error: err };
       }
-      throw err;
+      firstError ??= err;
     }
   }
-  return { documents, headroom, error: undefined };
+  return { documents, headroom, error: firstError };
 }
 
-function buildRedditPage(
-  documents: Document[],
-  cursor: Cursor | undefined,
-  headroom: RedditRateLimitHeadroom | undefined,
-  error: AppError | undefined,
-): RedditFetchPage {
-  if (error !== undefined) {
-    return { documents, cursor, outcome: { kind: 'partial', error }, rateLimitHeadroom: headroom };
+interface PageParts {
+  readonly documents: Document[];
+  readonly cursor: Cursor | undefined;
+  readonly headroom: RedditRateLimitHeadroom | undefined;
+  readonly error: AppError | undefined;
+  readonly truncatedReason: string | undefined;
+}
+
+function buildRedditPage(parts: PageParts): RedditFetchPage {
+  // `partial` outranks `truncated`: it is the outcome tied to the cursor not advancing, so
+  // it is the one a caller must not miss. The shortfall behind a `truncated` reason is
+  // logged regardless of which wins here.
+  const outcome: FetchPageOutcome | undefined =
+    parts.error !== undefined
+      ? { kind: 'partial', error: parts.error }
+      : parts.truncatedReason !== undefined
+        ? { kind: 'truncated', reason: parts.truncatedReason }
+        : undefined;
+  // Optional keys are set only when they carry a value, never assigned `undefined`: I-05
+  // reads `rateLimitHeadroom` by duck-typing, and `'rateLimitHeadroom' in page` must answer
+  // the same way for every page that lacks one.
+  const page: {
+    documents: Document[];
+    cursor: Cursor | undefined;
+    outcome?: FetchPageOutcome;
+    rateLimitHeadroom?: RedditRateLimitHeadroom;
+  } = { documents: parts.documents, cursor: parts.cursor };
+  if (outcome !== undefined) {
+    page.outcome = outcome;
   }
-  return headroom === undefined ? { documents, cursor } : { documents, cursor, rateLimitHeadroom: headroom };
+  if (parts.headroom !== undefined) {
+    page.rateLimitHeadroom = parts.headroom;
+  }
+  return page;
 }
 
 // --- Factory --------------------------------------------------------------------------
@@ -278,7 +430,9 @@ export function createRedditAdapter(options: RedditAdapterOptions = {}): SourceA
   };
   const net = options.netClient ?? sharedNetClient;
   const userAgent = options.userAgent ?? '';
-  const pairs = subreddits.flatMap((subreddit) => LISTINGS.map((listing) => ({ subreddit, listing })));
+  const pairs: readonly SubredditListing[] = subreddits.flatMap((subreddit) =>
+    LISTINGS.map((listing) => ({ subreddit, listing })),
+  );
 
   const tokens: TokenManager | undefined = hasAuth(options)
     ? createTokenManager({
@@ -306,44 +460,53 @@ export function createRedditAdapter(options: RedditAdapterOptions = {}): SourceA
       // with nothing to do, the same shape any adapter reports once genuinely exhausted.
       return { documents: [], cursor: undefined };
     }
-    const state = decodeIncrementalCursor(cursor, pairs.length);
-    const pair = pairs[state.pairIndex];
+    const position = resolveIncrementalPosition(cursor, pairs);
+    const pair = pairs[position.index];
     if (pair === undefined) {
-      // Unreachable given decodeIncrementalCursor's own bounds check; guarded explicitly
-      // rather than asserted away, since `noUncheckedIndexedAccess` makes this read
-      // `MappedPost | undefined` regardless of the invariant.
+      // Unreachable given resolveIncrementalPosition's own bounds; guarded explicitly rather
+      // than asserted away, since `noUncheckedIndexedAccess` types this read as optional.
       return { documents: [], cursor: undefined };
     }
     const deps = requireDeps();
 
-    const { posts, nextAfter, headroom: listingHeadroom } = await fetchListingPage(
+    const listingResult = await fetchListingPage(
       pair.subreddit,
       pair.listing,
-      state.after,
+      position.after,
       postsPerPage,
       topTimeWindow,
       deps,
     );
-    const {
-      documents: commentDocuments,
-      headroom: commentHeadroom,
-      error,
-    } = await expandQualifyingThreads(posts, pair.subreddit, deps);
+    const expansion = await expandQualifyingThreads(listingResult.posts, pair.subreddit, deps);
 
-    const documents = [...posts.map((p) => p.document), ...commentDocuments];
-    const nextState: IncrementalCursorState =
-      nextAfter !== null ? { pairIndex: state.pairIndex, after: nextAfter } : { pairIndex: state.pairIndex + 1, after: null };
-    const nextCursor = nextState.pairIndex >= pairs.length ? undefined : encodeIncrementalCursor(nextState);
+    const documents = [...listingResult.posts.map((post) => post.document), ...expansion.documents];
+    // Never advance past a page whose comments were not all fetched. Re-fetching a listing
+    // page is cheap and deduplicates on `(source, source_id)`; the comments skipped by
+    // advancing are gone, because nothing ever revisits a page the cursor has passed
+    // (CLAUDE.md rule 1). The caller bounds how many pages one run fetches, so a thread
+    // failing indefinitely stalls this sweep rather than looping forever inside this call.
+    const nextCursor =
+      expansion.error !== undefined
+        ? encodeIncrementalCursor(pair, position.after)
+        : listingResult.nextAfter !== null
+          ? encodeIncrementalCursor(pair, listingResult.nextAfter)
+          : cursorForNextPair(pairs, position.index);
 
-    return buildRedditPage(documents, nextCursor, commentHeadroom ?? listingHeadroom, error);
+    return buildRedditPage({
+      documents,
+      cursor: nextCursor,
+      headroom: expansion.headroom ?? listingResult.headroom,
+      error: expansion.error,
+      truncatedReason: listingResult.truncatedReason,
+    });
   }
 
   async function fetchBackfillPage(range: BackfillRange, cursor: Cursor | undefined): Promise<RedditFetchPage> {
     if (subreddits.length === 0) {
       return { documents: [], cursor: undefined };
     }
-    const state = decodeBackfillCursor(cursor, subreddits.length);
-    const subreddit = subreddits[state.subredditIndex];
+    const position = resolveBackfillPosition(cursor, subreddits);
+    const subreddit = subreddits[position.index];
     if (subreddit === undefined) {
       return { documents: [], cursor: undefined };
     }
@@ -353,37 +516,44 @@ export function createRedditAdapter(options: RedditAdapterOptions = {}): SourceA
     // (strictly newest-first) makes a date-range boundary detectable at all. `top`'s
     // ordering is not chronological, so it cannot tell this loop when it has paged past
     // `range.since` the way `new` can.
-    const { posts, nextAfter, headroom: listingHeadroom } = await fetchListingPage(
+    const listingResult = await fetchListingPage(
       subreddit,
       'new',
-      state.after,
+      position.after,
       postsPerPage,
       topTimeWindow,
       deps,
     );
 
-    const inRange = posts.filter(
+    const inRange = listingResult.posts.filter(
       (post) => post.document.createdAt >= range.since && post.document.createdAt <= range.until,
     );
     // `new` orders newest-first, so a post older than `range.since` means every subsequent
     // post on this page (and every later page) is older still — nothing further in this
     // subreddit can fall inside the range.
-    const passedWindow = posts.some((post) => post.document.createdAt < range.since);
+    const passedWindow = listingResult.posts.some((post) => post.document.createdAt < range.since);
 
-    const {
-      documents: commentDocuments,
-      headroom: commentHeadroom,
-      error,
-    } = await expandQualifyingThreads(inRange, subreddit, deps);
+    const expansion = await expandQualifyingThreads(inRange, subreddit, deps);
 
-    const documents = [...inRange.map((p) => p.document), ...commentDocuments];
-    const exhaustedThisSubreddit = nextAfter === null || passedWindow;
-    const nextState: BackfillCursorState = exhaustedThisSubreddit
-      ? { subredditIndex: state.subredditIndex + 1, after: null }
-      : { subredditIndex: state.subredditIndex, after: nextAfter };
-    const nextCursor = nextState.subredditIndex >= subreddits.length ? undefined : encodeBackfillCursor(nextState);
+    const documents = [...inRange.map((post) => post.document), ...expansion.documents];
+    const exhaustedThisSubreddit = listingResult.nextAfter === null || passedWindow;
+    // `cursor: undefined` is a positive claim that this range holds nothing more. A backfill
+    // range is swept once, so making that claim over a page whose comments were not all
+    // fetched loses them permanently — hence the reproducing cursor whenever a gap is known.
+    const nextCursor =
+      expansion.error !== undefined
+        ? encodeBackfillCursor(subreddit, position.after)
+        : exhaustedThisSubreddit
+          ? cursorForNextSubreddit(subreddits, position.index)
+          : encodeBackfillCursor(subreddit, listingResult.nextAfter);
 
-    return buildRedditPage(documents, nextCursor, commentHeadroom ?? listingHeadroom, error);
+    return buildRedditPage({
+      documents,
+      cursor: nextCursor,
+      headroom: expansion.headroom ?? listingResult.headroom,
+      error: expansion.error,
+      truncatedReason: listingResult.truncatedReason,
+    });
   }
 
   async function checkHealth(): Promise<HealthCheckResult> {

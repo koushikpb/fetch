@@ -14,6 +14,8 @@ import {
 
 const FIXTURES_DIR = path.join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', 'fixtures', 'reddit');
 
+// Every file under tests/fixtures/reddit/ is hand-authored, not captured from Reddit — see
+// that directory's README.md for the recording attempt that failed and what it leaves open.
 function loadFixture(file: string): unknown {
   return JSON.parse(readFileSync(path.join(FIXTURES_DIR, file), 'utf-8'));
 }
@@ -36,14 +38,25 @@ describe('normalizeAuthor', () => {
 });
 
 describe('parseListingResponse', () => {
-  it('unwraps a real Listing fixture into children + after', () => {
-    const { children, after } = parseListingResponse(loadFixture('listing-new-page1.json'), 'testsub');
+  it('unwraps a Listing fixture into children + after', () => {
+    const { children, after } = parseListingResponse(loadFixture('synthetic-listing-new-page1.json'), 'testsub');
     expect(children).toHaveLength(2);
     expect(after).toBe('t3_bbb222');
   });
 
+  it('reports how many children the response actually carried, so "returned nothing" stays distinguishable from "returned items we could not read"', () => {
+    const readable = parseListingResponse(loadFixture('synthetic-listing-new-page1.json'), 'testsub');
+    expect(readable.childCount).toBe(2);
+
+    // Children present, but none carrying a `data` record: `children` is empty while
+    // `childCount` still reports what arrived.
+    const unreadable = parseListingResponse({ data: { children: [{ kind: 't3' }, { kind: 't3' }] } }, 'testsub');
+    expect(unreadable.children).toHaveLength(0);
+    expect(unreadable.childCount).toBe(2);
+  });
+
   it('reports after as null when the listing is exhausted', () => {
-    const { after } = parseListingResponse(loadFixture('listing-new-page2.json'), 'testsub');
+    const { after } = parseListingResponse(loadFixture('synthetic-listing-new-page2.json'), 'testsub');
     expect(after).toBeNull();
   });
 
@@ -55,7 +68,7 @@ describe('parseListingResponse', () => {
 });
 
 describe('toPostDocument', () => {
-  const { children } = parseListingResponse(loadFixture('listing-new-page1.json'), 'testsub');
+  const { children } = parseListingResponse(loadFixture('synthetic-listing-new-page1.json'), 'testsub');
 
   it('maps every required Document field', () => {
     const mapped = toPostDocument(children[0]!);
@@ -68,12 +81,12 @@ describe('toPostDocument', () => {
       title: 'Anyone found a decent multi-bank subscription tracker?',
       body: "I've tried three apps and none of them handle more than one primary bank account well.",
       createdAt: new Date(1736460600 * 1000),
-      engagement: { score: 340, numComments: 3, upvoteRatio: 0.94 },
+      engagement: { score: 340, numComments: 6, upvoteRatio: 0.94 },
       raw: children[0],
     });
     expect(mapped?.postId36).toBe('aaa111');
     expect(mapped?.permalink).toBe('/r/testsub/comments/aaa111/anyone_found_a_decent_multibank_subscription/');
-    expect(mapped?.numComments).toBe(3);
+    expect(mapped?.numComments).toBe(6);
   });
 
   it('normalizes a deleted author to null and keeps an empty selftext as an empty body', () => {
@@ -139,7 +152,7 @@ describe('toCommentDocument', () => {
 
 describe('walkCommentTree — bounded depth and breadth (composer resolution 5)', () => {
   it('takes at most maxBreadth top-level comments, skips "more" stubs, and stops recursing past maxDepth', () => {
-    const [, commentsListing] = loadFixture('comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
+    const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
     const documents = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 2, 5);
 
     const sourceIds = documents.map((d) => d.sourceId);
@@ -160,15 +173,53 @@ describe('walkCommentTree — bounded depth and breadth (composer resolution 5)'
     expect(documents).toHaveLength(6);
   });
 
+  it('counts the top-level comments as the first level, matching Reddit\'s own depth param', () => {
+    const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
+
+    // maxDepth 1 is top-level only — not "top-level plus one nested level".
+    const oneLevel = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 1, 5).map((d) => d.sourceId);
+    expect(oneLevel).toEqual(['t1_cm1', 't1_c2', 't1_c3', 't1_c4', 't1_c5']);
+    expect(oneLevel).not.toContain('t1_cm1a');
+  });
+
+  it('applies maxBreadth per sibling group, not once per level', () => {
+    const wide = (id: string, replies: readonly string[]): unknown => ({
+      kind: 't1',
+      data: {
+        id,
+        name: `t1_${id}`,
+        author: `author_${id}`,
+        body: 'body',
+        created_utc: 1740000000,
+        score: 1,
+        replies:
+          replies.length === 0
+            ? ''
+            : { kind: 'Listing', data: { children: replies.map((replyId) => wide(replyId, [])) } },
+      },
+    });
+    const children = [
+      wide('p1', ['r1a', 'r1b', 'r1c']),
+      wide('p2', ['r2a', 'r2b', 'r2c']),
+      wide('p3', []),
+    ];
+
+    const sourceIds = walkCommentTree(children, '/r/testsub/x/', 2, 2).map((d) => d.sourceId);
+
+    // Breadth 2 caps each group independently: 2 top-level comments, and 2 replies under
+    // *each* of them — 6 documents from a breadth of 2, not 2 or 4.
+    expect(sourceIds).toEqual(['t1_p1', 't1_r1a', 't1_r1b', 't1_p2', 't1_r2a', 't1_r2b']);
+  });
+
   it('returns nothing at depth >= maxDepth without making any further request', () => {
-    const [, commentsListing] = loadFixture('comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
+    const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
     expect(walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 0, 5)).toEqual([]);
   });
 });
 
 describe('parseCommentsResponse', () => {
   it('unwraps the second Listing element of a real fixture', () => {
-    const children = parseCommentsResponse(loadFixture('comments-ccc333.json'), 'ccc333');
+    const children = parseCommentsResponse(loadFixture('synthetic-comments-ccc333.json'), 'ccc333');
     expect(children).toHaveLength(2);
   });
 

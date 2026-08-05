@@ -37,6 +37,11 @@ export function normalizeAuthor(author: unknown): string | null {
 export interface ParsedListing {
   readonly children: readonly Record<string, unknown>[];
   readonly after: string | null;
+  /** Entries in the raw `children` array, before any were dropped for not carrying a `data`
+   *  record. Reported separately so the caller can tell "Reddit returned nothing" from
+   *  "Reddit returned items this adapter could not read" — the two are indistinguishable
+   *  from `children.length` alone, and only the second is a defect. */
+  readonly childCount: number;
 }
 
 /** Validates and unwraps a Reddit `Listing` (`{kind: "Listing", data: {children, after}}`),
@@ -60,7 +65,7 @@ export function parseListingResponse(json: unknown, subreddit: string): ParsedLi
     .map((child) => asRecord(child.data))
     .filter((childData): childData is Record<string, unknown> => childData !== undefined);
   const after = typeof data.after === 'string' ? data.after : null;
-  return { children: childRecords, after };
+  return { children: childRecords, after, childCount: children.length };
 }
 
 export interface MappedPost {
@@ -195,10 +200,9 @@ export function walkCommentTree(
   return documents;
 }
 
-/** Reddit's comments endpoint returns a two-element array: `[postListing, commentsListing]`
- *  — this unwraps and validates the second element, the only one this adapter needs (the
- *  first duplicates the post this thread belongs to, already captured from the listing
- *  page). Throws `UpstreamError` on an unrecognizable top-level shape, for the same reason
+/** Only the second element of Reddit's `[postListing, commentsListing]` pair is read: the
+ *  first duplicates the post this thread belongs to, already captured from the listing page.
+ *  Throws `UpstreamError` on an unrecognizable top-level shape, for the same reason
  *  `parseListingResponse` does. */
 export function parseCommentsResponse(json: unknown, postId36: string): readonly unknown[] {
   if (!Array.isArray(json) || json.length < 2) {
