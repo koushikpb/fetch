@@ -6,15 +6,21 @@
 // lib/errors.ts, tests/**) must actually suppress only what it's meant to and nothing
 // more — fix round 1 found that lib/errors.ts's override had been suppressing the fetch
 // ban too, which a config-shape read would not have caught but a real `lintText` assertion
-// did. `lintText` with a virtual `filePath` is sufficient — ESLint's flat-config `files`
-// globs match against that path without the file needing to exist on disk, and
-// eslint.config.js's `allowDefaultProject` glob is what lets typed rules
-// (`@typescript-eslint/only-throw-error`) resolve type information for a path that isn't
-// part of the real tsconfig project. This does not require creating lib/net.ts or
-// lib/llm.ts (out of scope: F-04, F-05); the lib/errors.ts and tests/errors.test.ts
-// override tests below use those files' real, on-disk paths instead (with `lintText`
-// overriding their content), which needs no `allowDefaultProject` entry at all since
-// real files already resolve via the actual tsconfig project.
+// did. `lintText` with a `filePath` works whether or not that path is real on disk — ESLint's
+// flat-config `files` globs match against the given path regardless, and the `code` argument
+// always overrides whatever (if anything) is really there. Some paths below are still
+// virtual (`sources/example.ts` and its siblings) and depend on eslint.config.js's
+// `allowDefaultProject` for typed rules (`@typescript-eslint/only-throw-error`) to resolve
+// type information without a real tsconfig entry; others are real, on-disk paths (lib/net.ts,
+// lib/llm.ts, lib/errors.ts, tests/errors.test.ts — created by F-04, F-05, and F-06
+// respectively) that resolve through the actual tsconfig project instead and need no
+// `allowDefaultProject` entry at all. R-02 made that split self-maintaining: eslint.config.js
+// now filters its `allowDefaultProject` candidate list by `existsSync` at load time, so
+// lib/net.ts and lib/llm.ts moved from the first group to the second automatically the moment
+// F-04 and F-05 created them on disk, with no edit required in either file. The dedicated
+// "R-02 regression" describe block at the bottom of this file proves that split holds in both
+// directions at once, rather than relying on it being incidentally exercised by unrelated
+// prohibition tests above.
 import { ESLint } from 'eslint';
 import { describe, expect, it } from 'vitest';
 import { AppError } from '../lib/errors.js';
@@ -367,5 +373,38 @@ describe('eslint prohibitions (F-06 criterion 2, part 2: no bare rethrow-and-swa
       'lib/errors.ts',
     );
     expect(ruleIds).toContain('no-useless-catch');
+  });
+});
+
+// Regression test for R-02: eslint.config.js's `allowDefaultProject` used to be a fixed
+// array that never changed, so it silently drifted out of sync the moment a listed path
+// became a real file — F-04's lib/net.ts and F-05's lib/llm.ts both did this, and
+// typescript-eslint then hard-errored on *every* file in the run ("was included by
+// allowDefaultProject but also was found in the project service"), not just the two stale
+// entries. That failure mode is a fatal parser error, which surfaces as a `ruleId: null`
+// message — `lintMessages` above throws on exactly that rather than letting a test's rule-ID
+// assertion silently see an empty array and read "no violations" instead of "the check never
+// ran". A test that only exercised one of the two paths below would have passed even before
+// R-02's fix existed (each direction worked fine on its own; the bug was specifically the
+// interaction between a fixed candidate list and a path crossing from one side to the other),
+// so this asserts both directions in one place: a path R-02's `existsSync` filter now excludes
+// from `allowDefaultProject` because it is real on disk (lib/net.ts, resolved through the
+// actual tsconfig project), and a path the filter still includes because nothing has created
+// it (sources/example.ts, resolved through the default-project fallback). Both use
+// `@typescript-eslint/only-throw-error` specifically because it requires type information
+// (`requiresTypeChecking: true`) — exactly the kind of check that goes silently missing, not
+// loudly wrong, if type resolution for a path breaks.
+describe('eslint.config.js: allowDefaultProject derived from disk state (R-02)', () => {
+  it('resolves typed linting through a real, on-disk path (lib/net.ts) via the actual tsconfig project', async () => {
+    const ruleIds = await lint("export function f(): void {\n  throw 'oops';\n}\n", 'lib/net.ts');
+    expect(ruleIds).toContain('@typescript-eslint/only-throw-error');
+  });
+
+  it('resolves typed linting through a still-virtual path (sources/example.ts) via the allowDefaultProject fallback', async () => {
+    const ruleIds = await lint(
+      "export function f(): void {\n  throw 'oops';\n}\n",
+      'sources/example.ts',
+    );
+    expect(ruleIds).toContain('@typescript-eslint/only-throw-error');
   });
 });
