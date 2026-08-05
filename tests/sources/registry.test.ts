@@ -45,12 +45,13 @@ describe('createSourceRegistry', () => {
 });
 
 describe('registry (the production export)', () => {
-  // I-01 builds the seam, not the adapters that plug into it (SPEC I-01: "do not implement
-  // any real adapter") — this documents that deliberate starting state so the next task to
-  // touch sources/registry.ts (I-02, adding the Hacker News adapter) sees a failing
-  // assertion here as a prompt to update it, not a surprise.
-  it('starts empty — I-02/I-03/I-04 each add their adapter as they land', () => {
-    expect(registry.list()).toEqual([]);
+  // Deliberately exhaustive rather than a subset check: I-01 wrote this as a tripwire so that
+  // a task registering an adapter cannot do so without one assertion failing to prompt the
+  // update. A `toContain` here would let a fourth source register silently, which is the one
+  // thing this test exists to prevent.
+  it('lists exactly the adapters that have landed', () => {
+    expect(new Set(registry.list())).toEqual(new Set(['appstore']));
+    expect(registry.list()).toHaveLength(1);
   });
 
   it('conforms to the SourceRegistry shape (get, list)', () => {
