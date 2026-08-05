@@ -237,9 +237,44 @@ export interface LlmClient {
  * function in this module (and every caller) depends only on the structural interface —
  * that is what keeps `extract`/`synthesize` testable with a plain object standing in for
  * the client (composer resolution #8).
+ *
+ * Fix round 1 (Important): the whitelist guard previously lived only at the two call sites
+ * inside `extract()`/`synthesize()` — the returned client's `messages.create` and
+ * `messages.batches.create` delegated straight to the real SDK with no check of their own.
+ * `CreateMessageParams.model: AllowedModel` made that look safe at compile time, but a type
+ * assertion, an untyped JS caller, or any future third route built on this client would
+ * sail straight past it — criterion 2 ("no code path can invoke an Opus model") is a
+ * runtime guarantee, not a type-checker courtesy. Asserting here as well means the
+ * guarantee holds at the client boundary itself, independent of how many routes end up
+ * built on top of it or how disciplined their own callers are.
  */
 export function createAnthropicClient(apiKey: string): LlmClient {
-  return new Anthropic({ apiKey });
+  const sdk = new Anthropic({ apiKey });
+  return {
+    messages: {
+      // `async` here is deliberate, not stylistic: it guarantees `assertAllowedModel`'s
+      // throw surfaces as a rejected Promise, matching this method's declared
+      // `Promise<MessageResult>` return type. A plain (non-async) arrow function that
+      // throws before its first `return` throws *synchronously* when called — invisible
+      // to a caller using `.catch()` or `Promise.all`, and a footgun this guard must not
+      // introduce on its way to closing the Opus-ban gap.
+      create: async (params) => {
+        assertAllowedModel(params.model);
+        return sdk.messages.create(params);
+      },
+      countTokens: (params) => sdk.messages.countTokens(params),
+      batches: {
+        create: async (params) => {
+          for (const request of params.requests) {
+            assertAllowedModel(request.params.model);
+          }
+          return sdk.messages.batches.create(params);
+        },
+        retrieve: (batchId) => sdk.messages.batches.retrieve(batchId),
+        results: (batchId) => sdk.messages.batches.results(batchId),
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------------------
