@@ -1,0 +1,28 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "before": null,
+    "dist": 1,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "ddd444",
+          "name": "t3_ddd444",
+          "title": "Cool tool I built this weekend",
+          "selftext": "Not a complaint, just sharing.",
+          "author": "weekend_builder",
+          "created_utc": 1740059700,
+          "score": 58,
+          "num_comments": 0,
+          "upvote_ratio": 0.98,
+          "subreddit": "testsub",
+          "permalink": "/r/testsub/comments/ddd444/cool_tool_i_built_this_weekend/",
+          "over_18": false,
+          "is_self": true
+        }
+      }
+    ]
+  }
+}

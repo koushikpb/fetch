@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "Listing",
+    "data": { "children": [{ "kind": "t3", "data": { "id": "eee555", "name": "t3_eee555" } }] }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "cf1",
+            "name": "t1_cf1",
+            "author": "shift_worker_2",
+            "body": "I ended up hand-rolling a Google Calendar recurrence workaround, it's brittle but works.",
+            "created_utc": 1740823500,
+            "score": 31,
+            "parent_id": "t3_eee555",
+            "link_id": "t3_eee555",
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]

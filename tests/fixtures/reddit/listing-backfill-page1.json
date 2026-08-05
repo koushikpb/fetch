@@ -1,0 +1,64 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_shouldnotbefetched",
+    "before": null,
+    "dist": 3,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "postxtoonew",
+          "name": "t3_postxtoonew",
+          "title": "Newer than the requested backfill range",
+          "selftext": "Should be excluded for being newer than range.until.",
+          "author": "future_poster",
+          "created_utc": 1751716800,
+          "score": 10,
+          "num_comments": 0,
+          "upvote_ratio": 0.9,
+          "subreddit": "backfillsub",
+          "permalink": "/r/backfillsub/comments/postxtoonew/newer_than_the_requested_backfill_range/",
+          "over_18": false,
+          "is_self": true
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "postyinrange",
+          "name": "t3_postyinrange",
+          "title": "Squarely inside the requested backfill range",
+          "selftext": "Should be included.",
+          "author": "in_range_poster",
+          "created_utc": 1749976200,
+          "score": 44,
+          "num_comments": 1,
+          "upvote_ratio": 0.92,
+          "subreddit": "backfillsub",
+          "permalink": "/r/backfillsub/comments/postyinrange/squarely_inside_the_requested_backfill_range/",
+          "over_18": false,
+          "is_self": true
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "postztooold",
+          "name": "t3_postztooold",
+          "title": "Older than the requested backfill range",
+          "selftext": "Should be excluded, and should stop further pagination for this subreddit.",
+          "author": "past_poster",
+          "created_utc": 1747731600,
+          "score": 5,
+          "num_comments": 0,
+          "upvote_ratio": 0.8,
+          "subreddit": "backfillsub",
+          "permalink": "/r/backfillsub/comments/postztooold/older_than_the_requested_backfill_range/",
+          "over_18": false,
+          "is_self": true
+        }
+      }
+    ]
+  }
+}
