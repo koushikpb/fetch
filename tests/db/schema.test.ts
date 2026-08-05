@@ -12,18 +12,14 @@
 //
 // The known local connection strings (composer resolution F-02 #8: this file must not read
 // `process.env`) come from the task brief, not a secret — this is a fixed local dev
-// Postgres instance, not a deployed credential.
-import { randomBytes } from 'node:crypto';
+// Postgres instance, not a deployed credential. Provisioning itself lives in
+// tests/db/scratch-database.ts (R-03 fix round) — extracted after this file and
+// tests/db/seed.test.ts independently grew an identical CREATE/migrate/DROP block.
 import { Client } from 'pg';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createDb, type DbHandle } from '../../db/index.js';
-import { runMigrations } from '../../db/migrate.js';
 import { documents } from '../../db/schema.js';
-
-const ADMIN_CONNECTION = 'postgres://nick@localhost:5432/fetch_dev';
-const SCRATCH_DB = `fetch_scratch_schema_test_${randomBytes(4).toString('hex')}`;
-const SCRATCH_CONNECTION = `postgres://nick@localhost:5432/${SCRATCH_DB}`;
+import { setupScratchDatabase, teardownScratchDatabase, type ScratchDatabase } from './scratch-database.js';
 
 // The tables this task's schema defines, alongside `documents` itself — used by both the
 // "migration applies cleanly" and "all timestamptz" checks below so the expected table list
@@ -52,36 +48,25 @@ const DERIVED_TABLES = [
   'briefs',
 ];
 
-// `admin` stays connected to fetch_dev for the whole suite — CREATE/DROP DATABASE cannot
-// target the database a session is currently connected to. `scratch` is a second,
+// `handle.admin` stays connected to fetch_dev for the whole suite — CREATE/DROP DATABASE
+// cannot target the database a session is currently connected to. `scratch` is a second,
 // independent connection into the scratch database itself, used for every
 // information_schema / pg_catalog introspection query below: `information_schema.tables`
 // (and friends) only ever exposes the *currently connected* database's objects regardless
-// of any table_catalog filter, so querying them from `admin` would silently return nothing.
-let admin: Client;
+// of any table_catalog filter, so querying them from `handle.admin` would silently return
+// nothing.
+let handle: ScratchDatabase;
 let scratch: Client;
-let target: DbHandle;
 
 beforeAll(async () => {
-  admin = new Client({ connectionString: ADMIN_CONNECTION });
-  await admin.connect();
-  // CREATE DATABASE cannot run inside a transaction block; node-postgres issues each
-  // `query()` call as its own implicit statement, which is what makes this safe outside a
-  // transaction without an explicit `autocommit` setting.
-  await admin.query(`CREATE DATABASE "${SCRATCH_DB}"`);
-  await runMigrations(SCRATCH_CONNECTION);
-  target = createDb(SCRATCH_CONNECTION);
-  scratch = new Client({ connectionString: SCRATCH_CONNECTION });
+  handle = await setupScratchDatabase('schema_test');
+  scratch = new Client({ connectionString: handle.connectionString });
   await scratch.connect();
 }, 30_000);
 
 afterAll(async () => {
   await scratch.end();
-  await target.close();
-  // `WITH (force)` (PG13+) is a safety net in case a test above failed before closing its
-  // own connection — DROP DATABASE otherwise refuses while any session is attached.
-  await admin.query(`DROP DATABASE IF EXISTS "${SCRATCH_DB}" WITH (force)`);
-  await admin.end();
+  await teardownScratchDatabase(handle);
 }, 30_000);
 
 describe('criterion 1: migration applies cleanly to an empty Postgres 18 database', () => {
@@ -126,7 +111,7 @@ async function rejectingWithCause(fn: () => Promise<unknown>): Promise<never> {
 
 describe('criterion 2: documents has a unique (source, source_id) constraint and is append-only', () => {
   it('rejects a duplicate (source, source_id) insert', async () => {
-    await target.db.insert(documents).values({
+    await handle.target.db.insert(documents).values({
       source: 'hackernews',
       sourceId: 'dup-test-1',
       url: 'https://example.com/1',
@@ -134,7 +119,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
       createdAt: new Date('2025-01-01T00:00:00.000Z'),
     });
     await expect(
-      target.db.insert(documents).values({
+      handle.target.db.insert(documents).values({
         source: 'hackernews',
         sourceId: 'dup-test-1',
         url: 'https://example.com/1-again',
@@ -145,7 +130,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
   });
 
   it('rejects an UPDATE against documents (append-only trigger)', async () => {
-    const [row] = await target.db
+    const [row] = await handle.target.db
       .insert(documents)
       .values({
         source: 'reddit',
@@ -158,7 +143,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
     expect(row).toBeDefined();
     await expect(
       rejectingWithCause(() =>
-        target.db
+        handle.target.db
           .update(documents)
           .set({ title: 'mutated' })
           .where(eq(documents.id, row?.id ?? '')),
@@ -167,7 +152,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
   });
 
   it('rejects a DELETE against documents (append-only trigger)', async () => {
-    const [row] = await target.db
+    const [row] = await handle.target.db
       .insert(documents)
       .values({
         source: 'appstore',
@@ -179,7 +164,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
       .returning({ id: documents.id });
     expect(row).toBeDefined();
     await expect(
-      rejectingWithCause(() => target.db.delete(documents).where(eq(documents.id, row?.id ?? ''))),
+      rejectingWithCause(() => handle.target.db.delete(documents).where(eq(documents.id, row?.id ?? ''))),
     ).rejects.toThrow(/append-only/i);
   });
 
@@ -189,7 +174,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
   // connection (not drizzle's query builder, which has no TRUNCATE method) so the assertion
   // is on Postgres's actual response, not on a row count (per the finding's instruction).
   it('rejects TRUNCATE documents', async () => {
-    await target.db.insert(documents).values({
+    await handle.target.db.insert(documents).values({
       source: 'hackernews',
       sourceId: 'truncate-bare-test',
       url: 'https://example.com/4',
@@ -203,7 +188,7 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
   });
 
   it('rejects TRUNCATE documents CASCADE (the gap fix round 1 closed)', async () => {
-    await target.db.insert(documents).values({
+    await handle.target.db.insert(documents).values({
       source: 'reddit',
       sourceId: 'truncate-cascade-test',
       url: 'https://example.com/5',

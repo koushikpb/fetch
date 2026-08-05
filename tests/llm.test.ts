@@ -134,16 +134,30 @@ function makeFakeClient(options: FakeClientOptions = {}): { client: LlmClient; c
 function makeFakeRunsRepo(trailingSpendUsd = 0): {
   repo: RunsRepo;
   recorded: { runId: string; increment: RunUsageIncrement }[];
+  createdRuns: string[];
 } {
   const recorded: { runId: string; increment: RunUsageIncrement }[] = [];
+  // R-03 fix round (Finding 2): RunsRepo grew a `createRun` method, so every fake built by
+  // this helper needs one too — the interface is now the enforced precondition, not just
+  // `recordUsage` in isolation.
+  const createdRuns: string[] = [];
+  let nextFakeRunId = 0;
   const repo: RunsRepo = {
     getTrailingSpendUsd: () => Promise.resolve(trailingSpendUsd),
+    // `stage` intentionally unused — this fake never persists anything, only hands back a
+    // fresh id, so recording `stage` would be tracking state no test in this file asserts on.
+    createRun: () => {
+      nextFakeRunId += 1;
+      const id = `fake-run-${nextFakeRunId}`;
+      createdRuns.push(id);
+      return Promise.resolve(id);
+    },
     recordUsage: (runId, increment) => {
       recorded.push({ runId, increment });
       return Promise.resolve();
     },
   };
-  return { repo, recorded };
+  return { repo, recorded, createdRuns };
 }
 
 const noopSleep = (): Promise<void> => Promise.resolve();
@@ -666,6 +680,22 @@ describe('createAnthropicClient — the whitelist guard also applies at the clie
     ];
 
     await expect(client.messages.batches.create({ requests })).rejects.toBeInstanceOf(ConfigError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('client.messages.countTokens rejects an Opus model id with ConfigError, never reaching the SDK (R-03 Finding 1)', async () => {
+    // Fix round 1 guarded `create` and `batches.create` at this same boundary but left
+    // `countTokens` as a bare pass-through — this is the regression test for that gap.
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = createAnthropicClient('sk-ant-fixture-not-a-real-key');
+
+    await expect(
+      client.messages.countTokens({
+        model: unsafeModel('claude-opus-5'),
+        messages: [{ role: 'user', content: 'x' }],
+      }),
+    ).rejects.toBeInstanceOf(ConfigError);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
