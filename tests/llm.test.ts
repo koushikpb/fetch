@@ -621,6 +621,89 @@ describe('offline guarantee — no real network call ever occurs (composer resol
   });
 });
 
+describe('createAnthropicClient — the whitelist guard also applies at the client boundary (fix round 1, Important)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // `CreateMessageParams.model` (and the batch request's `params.model`) is typed as
+  // `AllowedModel`, so TypeScript would reject an Opus id at the call site below outright.
+  // That compile-time rejection is exactly the "convenience defeated by a single type
+  // assertion" the finding calls out — so this cast is the deliberate bypass under test,
+  // not a shortcut around it. `unknown` as the intermediate step (rather than a direct
+  // `as AllowedModel`) matches how an untyped JS caller or a runtime-constructed value
+  // would actually reach this function: with no compile-time signal at all.
+  function unsafeModel(id: string): AllowedModel {
+    return id as unknown as AllowedModel;
+  }
+
+  it('client.messages.create rejects an Opus model id with ConfigError, never reaching the SDK', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = createAnthropicClient('sk-ant-fixture-not-a-real-key');
+
+    await expect(
+      client.messages.create({
+        model: unsafeModel('claude-opus-5'),
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'x' }],
+      }),
+    ).rejects.toBeInstanceOf(ConfigError);
+    // The guard threw before the SDK ever built a request — proves this isn't a case
+    // where the real API itself happened to reject an unrecognized model.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('client.messages.batches.create rejects a batch containing an Opus model id with ConfigError, never reaching the SDK', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = createAnthropicClient('sk-ant-fixture-not-a-real-key');
+    const requests: BatchRequestParam[] = [
+      {
+        custom_id: 'doc-1',
+        params: { model: unsafeModel('claude-opus-5'), max_tokens: 100, messages: [{ role: 'user', content: 'x' }] },
+      },
+    ];
+
+    await expect(client.messages.batches.create({ requests })).rejects.toBeInstanceOf(ConfigError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('client.messages.batches.create checks every request in the batch, not just the first', async () => {
+    const client = createAnthropicClient('sk-ant-fixture-not-a-real-key');
+    const requests: BatchRequestParam[] = [
+      { custom_id: 'doc-1', params: { model: 'claude-haiku-4-5', max_tokens: 100, messages: [{ role: 'user', content: 'x' }] } },
+      { custom_id: 'doc-2', params: { model: unsafeModel('claude-opus-4-8'), max_tokens: 100, messages: [{ role: 'user', content: 'y' }] } },
+    ];
+
+    await expect(client.messages.batches.create({ requests })).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it('the guard lets both allowed models through — rejection past that point comes from the network, not ConfigError', async () => {
+    // This suite must stay offline (composer resolution #8), so the stubbed fetch rejects
+    // immediately rather than completing a real round trip. The assertion that matters is
+    // *what* rejects the call: not ConfigError, proving the guard itself did not block it.
+    const fetchSpy = vi.fn().mockRejectedValue(new Error('network disabled in this test'));
+    vi.stubGlobal('fetch', fetchSpy);
+    const client = createAnthropicClient('sk-ant-fixture-not-a-real-key');
+
+    for (const model of ALLOWED_MODELS) {
+      let thrown: unknown;
+      try {
+        await client.messages.create({ model, max_tokens: 100, messages: [{ role: 'user', content: 'x' }] });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown).not.toBeInstanceOf(ConfigError);
+    }
+    // Confirms the pass-through path really did reach the SDK's own request machinery
+    // (not vacuously true because create() stopped short for some unrelated reason), and
+    // that reach stayed entirely inside the stub — no real network I/O occurred.
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+});
+
 describe('ALLOWED_MODELS / RATES shape', () => {
   it('exposes exactly the two documented model ids', () => {
     expect([...ALLOWED_MODELS].sort()).toEqual(['claude-haiku-4-5', 'claude-sonnet-5']);
