@@ -176,8 +176,12 @@ platform terms-of-service question. These are composer decisions.
 ### Code
 
 - TypeScript strict. No `any` — use `unknown` and narrow.
-- Each module exports its types from a local `types.ts`; no cross-directory type imports
-  except from `lib/types.ts`.
+- Each module exports its types from a local `types.ts`. Do not type-import another module's
+  *internals* across directories. Importing from `lib/types.ts`, from `lib/errors.ts`, or from
+  another module's declared public entry point (`sources/registry.ts`, `ingest/index.ts`) is
+  fine — that is the seam working as intended. The rule exists to stop modules reaching into
+  each other's private structure and creating a tangle, not to forbid depending on a published
+  interface.
 - Source adapters implement `SourceAdapter` (`sources/types.ts`) without exception. That
   interface is the seam making future platforms cheap; never bypass it.
 - All outbound network calls go through `lib/net.ts` (retry, backoff, per-host rate
