@@ -12,6 +12,7 @@ import type {
   BackfillRange,
   Cursor,
   FetchPage,
+  FetchPageOutcome,
   HealthCheckResult,
   SourceAdapter,
 } from './types.js';
@@ -25,9 +26,9 @@ import type {
  */
 export interface FakeAdapterControls {
   /** Replaces the configured incremental pages and resets pagination to the first one. */
-  setPages(pages: readonly (readonly Document[])[]): void;
+  setPages(pages: readonly FakeAdapterPage[]): void;
   /** Replaces the configured backfill pages and resets pagination to the first one. */
-  setBackfillPages(pages: readonly (readonly Document[])[]): void;
+  setBackfillPages(pages: readonly FakeAdapterPage[]): void;
   setHealth(result: HealthCheckResult): void;
   /** `undefined` clears a previously configured failure — later fetches succeed again. */
   setFetchError(error: AppError | undefined): void;
@@ -40,15 +41,43 @@ export interface FakeSourceAdapter extends SourceAdapter {
   readonly fake: FakeAdapterControls;
 }
 
+/**
+ * A configured page is usually just its documents (the common case — an ordinary page with
+ * nothing noteworthy to report) — the bare-array form keeps that case terse. A page that
+ * needs to carry a `FetchPageOutcome` (fix round 1, Finding 3: `'truncated'` or `'partial'`)
+ * uses the object form instead. Accepting both, rather than only the richer object form
+ * everywhere, is what keeps every pre-existing `pages: [[doc1], [doc2]]` call site in this
+ * repo's own tests valid unchanged.
+ */
+export type FakeAdapterPage =
+  | readonly Document[]
+  | { readonly documents: readonly Document[]; readonly outcome?: FetchPageOutcome };
+
 export interface CreateFakeAdapterOptions {
   readonly source?: Source;
-  readonly pages?: readonly (readonly Document[])[];
-  readonly backfillPages?: readonly (readonly Document[])[];
+  readonly pages?: readonly FakeAdapterPage[];
+  readonly backfillPages?: readonly FakeAdapterPage[];
   readonly health?: HealthCheckResult;
   readonly fetchError?: AppError;
 }
 
 const DEFAULT_HEALTH: HealthCheckResult = { healthy: true, detail: 'fake adapter: ok' };
+
+function normalizePage(page: FakeAdapterPage | undefined): {
+  documents: readonly Document[];
+  outcome?: FetchPageOutcome;
+} {
+  if (page === undefined) {
+    return { documents: [] };
+  }
+  // `in` rather than `Array.isArray`: a readonly array member narrows correctly against
+  // `Array.isArray`'s `any[]` predicate in the *matched* branch, but TypeScript does not
+  // reliably exclude it from the *unmatched* branch of a union that also contains a plain
+  // object type, leaving `page` there typed as the full union instead of just the object
+  // member. Checking for the object form's own discriminant property instead narrows both
+  // branches correctly.
+  return 'documents' in page ? page : { documents: page };
+}
 
 /**
  * Cursors here are stringified page indices ("0", "1", ...) — an implementation detail of
@@ -59,12 +88,14 @@ const DEFAULT_HEALTH: HealthCheckResult = { healthy: true, detail: 'fake adapter
  * was passed in — the exact re-run behaviour I-05's "re-running immediately inserts zero
  * new rows" criterion needs a fake to be able to simulate.
  */
-function pageAt(pages: readonly (readonly Document[])[], cursor: Cursor | undefined): FetchPage {
+function pageAt(pages: readonly FakeAdapterPage[], cursor: Cursor | undefined): FetchPage {
   const index = cursor === undefined ? 0 : Number(cursor);
-  const documents = pages[index] ?? [];
+  const { documents, outcome } = normalizePage(pages[index]);
   const nextIndex = index + 1;
   const nextCursor = nextIndex < pages.length ? String(nextIndex) : undefined;
-  return { documents, cursor: nextCursor };
+  return outcome === undefined
+    ? { documents, cursor: nextCursor }
+    : { documents, cursor: nextCursor, outcome };
 }
 
 /**

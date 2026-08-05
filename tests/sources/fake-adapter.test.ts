@@ -2,9 +2,11 @@
 // deliverable I-02/I-03/I-04's own adapter tests and I-05's orchestrator tests will build
 // on. Every scenario resolution 6 lists gets its own test below: returning documents,
 // returning nothing, advancing a cursor, exhausting a cursor, reporting unhealthy, and
-// throwing on fetch.
+// throwing on fetch. Fix round 1, Finding 3 added two more: a page reporting a structural
+// truncation, and a page returning partial results alongside the error that stopped it —
+// covered in their own describe block below.
 import { describe, expect, it } from 'vitest';
-import { NetworkError } from '../../lib/errors.js';
+import { NetworkError, RateLimitError } from '../../lib/errors.js';
 import type { Document } from '../../lib/types.js';
 import { createFakeAdapter } from '../../sources/fake-adapter.js';
 
@@ -219,5 +221,81 @@ describe('createFakeAdapter — call counters', () => {
     const fake = createFakeAdapter({ fetchError: new NetworkError('down') });
     await expect(fake.fetchIncremental(undefined)).rejects.toThrow();
     expect(fake.fake.incrementalCallCount()).toBe(1);
+  });
+});
+
+describe('createFakeAdapter — fix round 1, Finding 3: FetchPageOutcome', () => {
+  it('a bare document array page still has no outcome (backward compatible with the pre-fix-round-1 shape)', async () => {
+    const fake = createFakeAdapter({ pages: [[DOC_1]] });
+    const page = await fake.fetchIncremental(undefined);
+    expect(page.outcome).toBeUndefined();
+  });
+
+  it('reports outcome: truncated for a page configured with one, cursor still undefined', async () => {
+    const fake = createFakeAdapter({
+      pages: [
+        {
+          documents: [DOC_1],
+          outcome: { kind: 'truncated', reason: 'RSS feed 500-review pagination ceiling reached' },
+        },
+      ],
+    });
+    const page = await fake.fetchIncremental(undefined);
+    expect(page.documents).toEqual([DOC_1]);
+    expect(page.cursor).toBeUndefined();
+    expect(page.outcome).toEqual({
+      kind: 'truncated',
+      reason: 'RSS feed 500-review pagination ceiling reached',
+    });
+  });
+
+  it('reports outcome: partial with the documents collected before the error and the error itself', async () => {
+    const partialError = new RateLimitError('rate limited partway through comment expansion');
+    const fake = createFakeAdapter({
+      pages: [{ documents: [DOC_1, DOC_2], outcome: { kind: 'partial', error: partialError } }],
+    });
+    const page = await fake.fetchIncremental(undefined);
+    // The defining property of `'partial'` (as opposed to just throwing): documents already
+    // collected are still returned, not lost to a rejection.
+    expect(page.documents).toEqual([DOC_1, DOC_2]);
+    expect(page.outcome).toEqual({ kind: 'partial', error: partialError });
+  });
+
+  it('a truncated/partial outcome on one page does not carry over to the next configured page', async () => {
+    const fake = createFakeAdapter({
+      pages: [{ documents: [DOC_1], outcome: { kind: 'truncated', reason: 'capped' } }, [DOC_2]],
+    });
+    const page1 = await fake.fetchIncremental(undefined);
+    expect(page1.outcome).toEqual({ kind: 'truncated', reason: 'capped' });
+    // page1.cursor is undefined by construction (truncation is documented as "categorically
+    // cannot page further"), so a fresh incremental call — not page1.cursor — is what an
+    // orchestrator would actually issue next; this proves the fake doesn't leak outcome
+    // state across separately-configured pages either way.
+    const page2 = await fake.fetchIncremental('1');
+    expect(page2.documents).toEqual([DOC_2]);
+    expect(page2.outcome).toBeUndefined();
+  });
+
+  it('backfill pages support outcome the same way incremental pages do', async () => {
+    const truncated = { kind: 'truncated' as const, reason: 'backfill range structurally capped' };
+    const fake = createFakeAdapter({ backfillPages: [{ documents: [DOC_1], outcome: truncated }] });
+    const range = {
+      since: new Date('2025-01-01T00:00:00.000Z'),
+      until: new Date('2025-02-01T00:00:00.000Z'),
+    };
+    const page = await fake.fetchBackfill(range, undefined);
+    expect(page.outcome).toEqual(truncated);
+  });
+
+  it('fake.setPages accepts a mix of bare-array and outcome-carrying pages', async () => {
+    const fake = createFakeAdapter();
+    fake.fake.setPages([
+      [DOC_1],
+      { documents: [DOC_2], outcome: { kind: 'truncated', reason: 'capped' } },
+    ]);
+    const page1 = await fake.fetchIncremental(undefined);
+    const page2 = await fake.fetchIncremental(page1.cursor);
+    expect(page1).toEqual({ documents: [DOC_1], cursor: '1' });
+    expect(page2.outcome).toEqual({ kind: 'truncated', reason: 'capped' });
   });
 });

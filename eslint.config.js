@@ -35,6 +35,18 @@
 //    every override that already redefines `no-restricted-syntax` for its file (NET_WRAPPER,
 //    ERRORS_MODULE, TESTS_GLOB) picks this ban back up explicitly rather than losing it by
 //    omission, since lib/config.ts is the only file that should ever be exempt from it.
+//  - I-01 criterion 3 ("the registry is the only way to obtain an adapter"): two rules close
+//    the two ways to reach `sources/{hackernews,appstore,reddit}/*` from outside
+//    sources/registry.ts. `no-restricted-imports` (`ADAPTER_DEEP_IMPORT_BAN`) bans the static
+//    `import ... from '...'` / `export ... from '...'` forms; `no-restricted-syntax`
+//    (`ADAPTER_DEEP_IMPORT_EXPRESSION_BAN`) separately bans the dynamic `import(...)` form,
+//    which `no-restricted-imports` does not see at all (fix round 1, Finding 2 — verified
+//    empirically: a dynamic import of a banned path produced zero messages against only the
+//    first rule). Two exemptions exist, both redefining rather than disabling: sources/
+//    registry.ts (the door itself) and tests/sources/{hackernews,appstore,reddit}/** (fix
+//    round 1, Finding 1 — I-02/I-03/I-04 need to unit-test their own adapter module
+//    directly, the same way every other adapter test in this repo imports the module under
+//    test).
 //
 // `only-throw-error` requires type information (`requiresTypeChecking: true` in its own
 // metadata), so this file turns on typed linting via `parserOptions.projectService`.
@@ -95,6 +107,13 @@ const ALLOW_DEFAULT_PROJECT_CANDIDATES = [
   'sources/example.ts',
   'sources/hackernews/example.ts',
   'sources/reddit/example.ts',
+  // Fix round 1, Finding 1: virtual fixtures proving the tests/sources/<platform>/**
+  // override (below) actually lifts the adapter-deep-import ban there — I-02/I-03/I-04
+  // haven't landed yet, so no real file exists at either path (these stay virtual, like
+  // the sources/hackernews/example.ts and sources/reddit/example.ts entries above, until a
+  // real adapter test file appears at one of these exact paths).
+  'tests/sources/hackernews/example.test.ts',
+  'tests/sources/appstore/example.test.ts',
 ];
 
 const allowDefaultProject = ALLOW_DEFAULT_PROJECT_CANDIDATES.filter(
@@ -160,6 +179,22 @@ const ADAPTER_DEEP_IMPORT_BAN = {
   message: `Importing a platform adapter's internals directly is forbidden outside ${REGISTRY_MODULE} — obtain an adapter through the registry instead (SPEC I-01 criterion 3).`,
 };
 
+// Fix round 1, Finding 2: `no-restricted-imports` only inspects `ImportDeclaration` /
+// `ExportNamedDeclaration` / `ExportAllDeclaration` nodes — it never sees an `ImportExpression`
+// (`import('./hackernews/adapter.js')`), so ADAPTER_DEEP_IMPORT_BAN alone leaves the dynamic
+// form of the exact same bypass wide open. This is the same class of gap FETCH_BAN and
+// PROCESS_ENV_BAN close for their own targets (a single AST node shape, matched everywhere via
+// `no-restricted-syntax` rather than trusting every caller to remember a second rule), so it
+// gets the same treatment rather than a bespoke fix. Same regex as ADAPTER_DEEP_IMPORT_BAN,
+// re-expressed as an esquery regex literal (`/pattern/`, forward slashes escaped) since
+// `no-restricted-syntax` selectors match via esquery, not the `ignore`/`regex`-string option
+// `no-restricted-imports` accepts — verified against a standalone ESLint run before wiring
+// this in, matching `import('./hackernews/adapter.js')` and not `import('./types.js')`.
+const ADAPTER_DEEP_IMPORT_EXPRESSION_BAN = {
+  selector: 'ImportExpression[source.value=/(^|\\/)(hackernews|appstore|reddit)(\\/|$)/]',
+  message: `Importing a platform adapter's internals directly is forbidden outside ${REGISTRY_MODULE} — obtain an adapter through the registry instead (SPEC I-01 criterion 3). This bans the dynamic import() form specifically; ADAPTER_DEEP_IMPORT_BAN bans the static form.`,
+};
+
 export default tseslint.config(
   { ignores: ['node_modules/**', 'dist/**', '.next/**', 'coverage/**'] },
   ...tseslint.configs.recommended,
@@ -184,6 +219,7 @@ export default tseslint.config(
         CONSTRUCT_BUILTIN_ERROR_BAN,
         EXTENDS_BUILTIN_ERROR_BAN,
         PROCESS_ENV_BAN,
+        ADAPTER_DEEP_IMPORT_EXPRESSION_BAN,
       ],
       'no-restricted-imports': [
         'error',
@@ -212,6 +248,7 @@ export default tseslint.config(
         CONSTRUCT_BUILTIN_ERROR_BAN,
         EXTENDS_BUILTIN_ERROR_BAN,
         PROCESS_ENV_BAN,
+        ADAPTER_DEEP_IMPORT_EXPRESSION_BAN,
       ],
     },
   },
@@ -229,7 +266,12 @@ export default tseslint.config(
     // PROCESS_ENV_BAN too if the rule were ever switched off instead of redefined.
     files: [ERRORS_MODULE],
     rules: {
-      'no-restricted-syntax': ['error', FETCH_BAN, PROCESS_ENV_BAN],
+      'no-restricted-syntax': [
+        'error',
+        FETCH_BAN,
+        PROCESS_ENV_BAN,
+        ADAPTER_DEEP_IMPORT_EXPRESSION_BAN,
+      ],
     },
   },
   {
@@ -243,15 +285,22 @@ export default tseslint.config(
         FETCH_BAN,
         CONSTRUCT_BUILTIN_ERROR_BAN,
         EXTENDS_BUILTIN_ERROR_BAN,
+        ADAPTER_DEEP_IMPORT_EXPRESSION_BAN,
       ],
     },
   },
   {
     // sources/registry.ts is the sole permitted door into a platform adapter's internals
     // (SPEC I-01 criterion 3; composer resolution 4) — this drops ADAPTER_DEEP_IMPORT_BAN
-    // only, the same redefine-not-disable idiom as every override above, so the file stays
-    // bound by the @anthropic-ai/sdk ban (and every no-restricted-syntax ban above,
-    // untouched by this block since it doesn't mention that rule at all).
+    // (static form) and ADAPTER_DEEP_IMPORT_EXPRESSION_BAN (dynamic form) only, the same
+    // redefine-not-disable idiom as every override above. The file stays bound by the
+    // @anthropic-ai/sdk ban and every other no-restricted-syntax ban — fix round 1 added
+    // the `no-restricted-syntax` entry below (this block previously didn't need one, since
+    // ADAPTER_DEEP_IMPORT_EXPRESSION_BAN didn't exist yet); it restates FETCH_BAN,
+    // CONSTRUCT_BUILTIN_ERROR_BAN, EXTENDS_BUILTIN_ERROR_BAN, and PROCESS_ENV_BAN rather than
+    // omitting them, since a later block's `rules` entry replaces an earlier match's for that
+    // rule key instead of merging with it — the same reason every other override in this file
+    // restates the bans it isn't dropping.
     files: [REGISTRY_MODULE],
     rules: {
       'no-restricted-imports': [
@@ -264,6 +313,13 @@ export default tseslint.config(
             },
           ],
         },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        FETCH_BAN,
+        CONSTRUCT_BUILTIN_ERROR_BAN,
+        EXTENDS_BUILTIN_ERROR_BAN,
+        PROCESS_ENV_BAN,
       ],
     },
   },
@@ -279,7 +335,51 @@ export default tseslint.config(
     // anywhere, tests included.
     files: [TESTS_GLOB],
     rules: {
+      'no-restricted-syntax': [
+        'error',
+        FETCH_BAN,
+        EXTENDS_BUILTIN_ERROR_BAN,
+        PROCESS_ENV_BAN,
+        ADAPTER_DEEP_IMPORT_EXPRESSION_BAN,
+      ],
+    },
+  },
+  {
+    // Fix round 1, Finding 1 (CRITICAL): the TESTS_GLOB override above never touched
+    // `no-restricted-imports`, so tests/** inherited the base ADAPTER_DEEP_IMPORT_BAN
+    // unmodified — meaning I-02/I-03/I-04 had no directory in which to unit-test their own
+    // adapter module directly, since sources/hackernews/, sources/appstore/, and
+    // sources/reddit/ are pinned by stub files already on disk and every plausible test path
+    // under tests/sources/<platform>/ matches the same ban. Routing every adapter test
+    // through the shared `registry` singleton instead was the only alternative, which would
+    // mean every adapter's tests sharing one netClient's rate-limit state and transport —
+    // the opposite of createNetClient's own "tests build one per case so state never leaks
+    // between them" pattern (lib/net.ts's doc comment).
+    //
+    // This block is deliberately scoped to exactly the three adapter test directories, not
+    // all of tests/**, and — like the sources/registry.ts override above — drops both
+    // ADAPTER_DEEP_IMPORT_BAN (static import) and ADAPTER_DEEP_IMPORT_EXPRESSION_BAN
+    // (dynamic import) so a test isn't arbitrarily allowed one form and not the other. It
+    // restates FETCH_BAN, EXTENDS_BUILTIN_ERROR_BAN, and PROCESS_ENV_BAN — the TESTS_GLOB
+    // block's own restrictions minus CONSTRUCT_BUILTIN_ERROR_BAN, exactly matching what
+    // TESTS_GLOB already carries — rather than omitting them, for the same "a later block's
+    // `rules` entry replaces rather than merges" reason as every override in this file. This
+    // block is placed after TESTS_GLOB in the array specifically so its narrower `files`
+    // glob wins for the files both match.
+    files: ['tests/sources/hackernews/**', 'tests/sources/appstore/**', 'tests/sources/reddit/**'],
+    rules: {
       'no-restricted-syntax': ['error', FETCH_BAN, EXTENDS_BUILTIN_ERROR_BAN, PROCESS_ENV_BAN],
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@anthropic-ai/sdk',
+              message: `Import the Anthropic SDK only in ${LLM_WRAPPER} — all model calls route through it (CLAUDE.md conventions).`,
+            },
+          ],
+        },
+      ],
     },
   },
   prettierConfig,
