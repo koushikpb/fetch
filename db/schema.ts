@@ -63,6 +63,33 @@ export const documents = pgTable(
   (t) => [unique('documents_source_source_id_unique').on(t.source, t.sourceId)],
 );
 
+// Where an adapter's opaque continuation token survives between runs (I-05 blocker B-08).
+// `fetchIncremental(cursor)` is specified to receive back exactly the `Cursor` the previous
+// `FetchPage` returned, so without somewhere to keep it every run restarts from the
+// adapter's own initial lookback — a full re-fetch each time and, worse, a permanent skip
+// for anything older than that lookback.
+//
+// Deliberately NOT append-only, and deliberately not given 0002's trigger treatment: a
+// high-water mark advances by definition, so one mutable row per source is the whole point.
+// `documents` is the table whose immutability is a correctness property; this one's job is
+// to change. Composer resolution I-05 #1 states this explicitly.
+//
+// Incremental cursors only. A backfill cursor is meaningless without the `BackfillRange` it
+// paginates, which this row has no column for, and it is one-shot (a range is walked to
+// exhaustion within a single run) rather than a long-lived high-water mark — storing both
+// here would let a backfill's per-range position overwrite the incremental mark, and unlike
+// a re-fetch that loss is unrecoverable because the cursor is opaque and cannot be
+// reconstructed. See ingest/orchestrator.ts, which pages a backfill range in memory.
+export const sourceCursors = pgTable('source_cursors', {
+  // The source *is* the identity — one high-water mark per source, so a separate surrogate
+  // key would only permit a second, ambiguous row for the same source.
+  source: sourceEnum('source').primaryKey(),
+  // Opaque by contract (sources/types.ts `Cursor`): stored and replayed verbatim, never
+  // parsed here or by the orchestrator.
+  cursor: text('cursor').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const embeddings = pgTable(
   'embeddings',
   {
@@ -185,6 +212,7 @@ export const runs = pgTable('runs', {
 
 export type DocumentRow = typeof documents.$inferSelect;
 export type NewDocumentRow = typeof documents.$inferInsert;
+export type SourceCursorRow = typeof sourceCursors.$inferSelect;
 export type EmbeddingRow = typeof embeddings.$inferSelect;
 export type PainPointRow = typeof painPoints.$inferSelect;
 export type ClusterRow = typeof clusters.$inferSelect;

@@ -29,6 +29,13 @@
       "when": 1785913390628,
       "tag": "0003_enforce-truncate",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785960513807,
+      "tag": "0004_source-cursors",
+      "breakpoints": true
     }
   ]
 }
