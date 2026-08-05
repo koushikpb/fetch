@@ -182,6 +182,40 @@ describe('criterion 2: documents has a unique (source, source_id) constraint and
       rejectingWithCause(() => target.db.delete(documents).where(eq(documents.id, row?.id ?? ''))),
     ).rejects.toThrow(/append-only/i);
   });
+
+  // Fix round 1 (review finding, Important): row-level BEFORE UPDATE/DELETE triggers never
+  // fire for TRUNCATE — Postgres requires a separate BEFORE TRUNCATE ... FOR EACH STATEMENT
+  // trigger, added in drizzle/0003_enforce-truncate.sql. These use the raw `scratch`
+  // connection (not drizzle's query builder, which has no TRUNCATE method) so the assertion
+  // is on Postgres's actual response, not on a row count (per the finding's instruction).
+  it('rejects TRUNCATE documents', async () => {
+    await target.db.insert(documents).values({
+      source: 'hackernews',
+      sourceId: 'truncate-bare-test',
+      url: 'https://example.com/4',
+      body: 'row exists to give TRUNCATE something to destroy',
+      createdAt: new Date('2025-01-01T00:00:00.000Z'),
+    });
+    // A bare TRUNCATE on a table another table has a foreign key into already fails in
+    // stock Postgres (embeddings -> documents) — that incidental protection is exactly what
+    // CASCADE below removes, so this asserts only that it rejects, not what rejects it.
+    await expect(scratch.query('TRUNCATE documents')).rejects.toThrow();
+  });
+
+  it('rejects TRUNCATE documents CASCADE (the gap fix round 1 closed)', async () => {
+    await target.db.insert(documents).values({
+      source: 'reddit',
+      sourceId: 'truncate-cascade-test',
+      url: 'https://example.com/5',
+      body: 'row exists to give TRUNCATE CASCADE something to destroy',
+      createdAt: new Date('2025-01-01T00:00:00.000Z'),
+    });
+    // CASCADE removes the incidental FK-based protection the bare-TRUNCATE test above relies
+    // on — before 0003_enforce-truncate.sql this silently emptied the table with zero
+    // errors. Matching on the trigger's own message (not just "it rejects") is what proves
+    // this specific gap is closed, not just that some unrelated error happens to fire.
+    await expect(scratch.query('TRUNCATE documents CASCADE')).rejects.toThrow(/append-only/i);
+  });
 });
 
 describe('criterion 3: every derived table reaches documents (resolution F-02 #4)', () => {
