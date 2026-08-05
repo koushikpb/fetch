@@ -231,18 +231,67 @@ describe('adapter settings (I-05)', () => {
     expect(config.reddit?.minCommentsToExpand).toBe(12);
   });
 
-  it('rejects REDDIT_SUBREDDITS without credentials rather than silently ignoring it', () => {
-    // Without credentials I-05 drops the Reddit adapter entirely (blocker B-09), so a
-    // configured subreddit list would never be swept — and nothing would say so.
-    expect(() => loadConfig({ ...MINIMAL_VALID_ENV, REDDIT_SUBREDDITS: 'selfhosted' })).toThrow(
-      /REDDIT_SUBREDDITS/,
-    );
+  // Fix round 1, Finding 5: Reddit settings without Reddit credentials used to be a boot
+  // error, which took Hacker News and App Store ingestion down with it over a setting that
+  // affects neither. It is a warning now — the run row already records the Reddit skip and
+  // its reason, so the information was never actually lost.
+  it('does not reject Reddit settings configured without credentials', () => {
+    const config = loadConfig({
+      ...MINIMAL_VALID_ENV,
+      REDDIT_SUBREDDITS: 'selfhosted',
+      REDDIT_MIN_COMMENTS_TO_EXPAND: '5',
+    });
+    expect(config.reddit).toBeUndefined();
+    // The other two sources are entirely unaffected, which is the whole point of relaxing it.
+    expect(config.databaseUrl).toBe(MINIMAL_VALID_ENV.DATABASE_URL);
   });
 
-  it('rejects REDDIT_MIN_COMMENTS_TO_EXPAND without credentials', () => {
-    expect(() => loadConfig({ ...MINIMAL_VALID_ENV, REDDIT_MIN_COMMENTS_TO_EXPAND: '5' })).toThrow(
-      /REDDIT_MIN_COMMENTS_TO_EXPAND/,
-    );
+  it('warns at boot — naming the variables, never their values — when they cannot be used', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://stub:stub@localhost:5432/stub_db');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'stub-anthropic-key');
+    vi.stubEnv('REDDIT_SUBREDDITS', 'selfhosted,smallbusiness');
+    vi.stubEnv('REDDIT_CLIENT_ID', undefined);
+    vi.stubEnv('REDDIT_CLIENT_SECRET', undefined);
+    vi.stubEnv('REDDIT_USER_AGENT', undefined);
+
+    const capture = captureStdoutWrites();
+    const config = bootConfig();
+    capture.restore();
+
+    expect(config.reddit).toBeUndefined();
+    const written = capture.text();
+    expect(written).toContain('REDDIT_SUBREDDITS');
+    expect(written).toContain('"level":"warn"');
+    // Names, not values — REDDIT_SUBREDDITS is not itself a secret but it sits beside two
+    // that are, and the boot path should not start printing env values.
+    expect(written).not.toContain('smallbusiness');
+    vi.unstubAllEnvs();
+  });
+
+  it('stays silent at boot when the settings are usable', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://stub:stub@localhost:5432/stub_db');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'stub-anthropic-key');
+    vi.stubEnv('REDDIT_SUBREDDITS', 'selfhosted');
+    vi.stubEnv('REDDIT_CLIENT_ID', 'id');
+    vi.stubEnv('REDDIT_CLIENT_SECRET', 'secret');
+    vi.stubEnv('REDDIT_USER_AGENT', 'ua');
+
+    const capture = captureStdoutWrites();
+    bootConfig();
+    capture.restore();
+
+    expect(capture.text()).toBe('');
+    vi.unstubAllEnvs();
+  });
+
+  it('keeps loadConfig pure — no warning is written when it is called directly', () => {
+    // The warning lives in `bootConfig`, not the validator: `loadConfig` is documented as
+    // safe to call with a literal object in tests, and a validator that writes to stdout
+    // would not be.
+    const capture = captureStdoutWrites();
+    loadConfig({ ...MINIMAL_VALID_ENV, REDDIT_SUBREDDITS: 'selfhosted' });
+    capture.restore();
+    expect(capture.text()).toBe('');
   });
 
   it('rejects a non-integer or negative REDDIT_MIN_COMMENTS_TO_EXPAND', () => {

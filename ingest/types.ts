@@ -33,6 +33,15 @@ export type IngestStopReason =
    * this is its ordinary steady-state terminator.
    */
   | 'no-progress'
+  /**
+   * The same identical-cursor condition as `no-progress`, but the page carried documents.
+   * Separated because handing back documents while claiming no new position is an adapter
+   * contract anomaly rather than a steady state — "caught up" is the wrong story to tell
+   * about it — and because a source stuck this way would otherwise be indistinguishable, on
+   * the run row, from one that is simply up to date. No adapter does this today; the loop
+   * stops either way and the cursor is never advanced, so there is no skip risk.
+   */
+  | 'no-progress-with-documents'
   /** The stall predicate fired: identical cursor *and* a `partial` outcome. See the orchestrator. */
   | 'stalled'
   /** Hit `maxPagesPerRun`. Coverage is incomplete but resumable — the cursor is persisted. */
@@ -54,7 +63,14 @@ export type SourceRunStatus =
   /** `checkHealth()` reported `healthy: false`, so no fetch was attempted. */
   | 'unhealthy'
   /** No adapter registered for this source — configured off (see `SkippedSource`). */
-  | 'skipped';
+  | 'skipped'
+  /**
+   * The run ended before this source was reached — a run-level failure, not a statement
+   * about the source. Distinct from `'skipped'` (deliberately configured off) because the
+   * two call for opposite responses: one is a settings choice, the other is something that
+   * broke. Never counts toward the run's status for that reason.
+   */
+  | 'not-attempted';
 
 /** `runs.status`. `PARTIAL` is the value SPEC I-05 criterion 2 names explicitly. */
 export type IngestRunStatus = 'COMPLETE' | 'PARTIAL' | 'FAILED';
@@ -66,7 +82,14 @@ export interface SourceIngestCounts {
   readonly fetched: number;
   /** Rows the `documents` insert actually created. */
   readonly inserted: number;
-  /** `fetched - inserted`: already present under the same `(source, source_id)`. */
+  /**
+   * Documents the sink reported as already present under the same `(source, source_id)`.
+   * Counted from completed inserts only, never derived as `fetched - inserted`: when an
+   * insert throws, its documents are neither inserted nor known to be duplicates, and
+   * reporting them as duplicates would claim rows exist that do not. The invariant is
+   * `inserted + duplicates <= fetched`; any shortfall is a page whose write did not
+   * complete, and the run's `errors` say why.
+   */
   readonly duplicates: number;
   readonly pages: number;
   readonly durationMs: number;

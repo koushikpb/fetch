@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { runIngest } from '../../ingest/orchestrator.js';
 import type { IngestReport, SourceIngestCounts } from '../../ingest/types.js';
-import { NetworkError, RateLimitError, UpstreamError } from '../../lib/errors.js';
+import { ConfigError, NetworkError, RateLimitError, UpstreamError } from '../../lib/errors.js';
 import type { Source } from '../../lib/types.js';
 import { createFakeAdapter } from '../../sources/fake-adapter.js';
 import { createSourceRegistry } from '../../sources/registry.js';
@@ -89,6 +89,48 @@ describe('runIngest — documents reach the sink and are accounted for', () => {
     expect(second.totals.duplicates).toBe(2);
     expect(h.documents.stored.size).toBe(2);
     expect(second.status).toBe('COMPLETE');
+  });
+
+  it('does not report unwritten documents as duplicates when an insert fails', async () => {
+    // Fix round 1, Finding 3. `duplicates` used to be `fetched - inserted`, so a page whose
+    // insert threw reported its documents as "already present" — rows that were never
+    // written and are not in the table. `runs` rows are what an operator reads to work out
+    // what happened, and a count that means something different on the error path is worse
+    // than no count at all.
+    const h = harness();
+    h.documents.failNext(new UpstreamError('documents: connection terminated unexpectedly'));
+    const adapter = createFakeAdapter({
+      source: 'hackernews',
+      pages: [[makeDocument('hackernews', 'lost-1'), makeDocument('hackernews', 'lost-2')]],
+    });
+
+    const report = await runIngest({ registry: createSourceRegistry([adapter]), ...h });
+
+    const counts = countsFor(report, 'hackernews');
+    expect(counts.fetched).toBe(2);
+    expect(counts.inserted).toBe(0);
+    expect(counts.duplicates).toBe(0);
+    // The invariant the doc comment states, and the shortfall an operator reads as "two
+    // documents whose write did not complete — see errors".
+    expect(counts.inserted + counts.duplicates).toBeLessThanOrEqual(counts.fetched);
+    expect(counts.status).toBe('failed');
+    expect(report.errors[0]?.message).toContain('connection terminated');
+  });
+
+  it('still counts genuine duplicates from the pages that did succeed', async () => {
+    const shared = makeDocument('hackernews', 'seen-twice');
+    const h = harness();
+    const adapter = createFakeAdapter({
+      source: 'hackernews',
+      pages: [[shared], [shared, makeDocument('hackernews', 'fresh')]],
+    });
+
+    const report = await runIngest({ registry: createSourceRegistry([adapter]), ...h });
+
+    const counts = countsFor(report, 'hackernews');
+    expect(counts.fetched).toBe(3);
+    expect(counts.inserted).toBe(2);
+    expect(counts.duplicates).toBe(1);
   });
 
   it('an empty page is not an error and is never handed to the sink as an empty insert', async () => {
@@ -191,6 +233,65 @@ describe('runIngest — one adapter failing does not abort the others (criterion
     const error = report.errors.find((entry) => entry.source === 'hackernews');
     expect(error?.name).toBe('TypeError');
     expect(error?.code).toBeUndefined();
+  });
+
+  it('a non-AppError thrown by checkHealth is contained too, not just one from fetchIncremental', async () => {
+    // Fix round 1, Finding 1. The mirror of the test above, for the other method. All three
+    // adapters catch `AppError` and rethrow anything else, so a plain bug in a health probe
+    // used to escape the per-source boundary entirely: `runIngest` rejected, the *other*
+    // source was never asked, and zero rows were written. Criterion 2 does not care which
+    // method an adapter fails in.
+    const broken = createFakeAdapter({ source: 'hackernews' });
+    const h = harness();
+    const registry = createSourceRegistry([
+      {
+        source: 'hackernews',
+        fetchBackfill: broken.fetchBackfill.bind(broken),
+        fetchIncremental: broken.fetchIncremental.bind(broken),
+        async checkHealth() {
+          throw new TypeError('cannot read properties of undefined (reading "status")');
+        },
+      },
+      createFakeAdapter({ source: 'appstore', pages: [[makeDocument('appstore', 'survived')]] }),
+    ]);
+
+    const report = await runIngest({ registry, ...h });
+
+    expect(report.status).toBe('PARTIAL');
+    expect(countsFor(report, 'hackernews').status).toBe('failed');
+    expect(countsFor(report, 'hackernews').stopReason).toBe('error');
+    // The point: the other source still ran and its document is written.
+    expect(countsFor(report, 'appstore').status).toBe('complete');
+    expect(h.documents.stored.size).toBe(1);
+    const error = report.errors.find((entry) => entry.source === 'hackernews');
+    expect(error?.name).toBe('TypeError');
+    expect(error?.kind).toBe('thrown');
+    // And the run row still exists rather than the whole run rejecting.
+    expect(h.runs.finished).toHaveLength(1);
+  });
+
+  it('an AppError thrown by checkHealth is contained the same way', async () => {
+    const broken = createFakeAdapter({ source: 'hackernews' });
+    const h = harness();
+    const registry = createSourceRegistry([
+      {
+        source: 'hackernews',
+        fetchBackfill: broken.fetchBackfill.bind(broken),
+        fetchIncremental: broken.fetchIncremental.bind(broken),
+        async checkHealth() {
+          throw new NetworkError('algolia: DNS failure during health probe');
+        },
+      },
+      createFakeAdapter({ source: 'appstore', pages: [[makeDocument('appstore', 'survived-2')]] }),
+    ]);
+
+    const report = await runIngest({ registry, ...h });
+
+    expect(report.status).toBe('PARTIAL');
+    expect(countsFor(report, 'appstore').status).toBe('complete');
+    expect(report.errors.find((entry) => entry.source === 'hackernews')?.code).toBe(
+      'NETWORK_ERROR',
+    );
   });
 
   it('is FAILED, not PARTIAL, when every attempted source failed', async () => {
@@ -368,6 +469,38 @@ describe('runIngest — the stall predicate (composer resolution 3)', () => {
     expect(counts.stopReason).toBe('no-progress');
     expect(report.status).toBe('COMPLETE');
     expect(report.errors).toEqual([]);
+  });
+
+  it('distinguishes an identical cursor that came back with documents from a caught-up one', async () => {
+    // Fix round 1, Finding 4. Emptiness is deliberately not part of the no-progress
+    // predicate — the loop must stop either way, since a repeated cursor can only reproduce
+    // its own page, and requiring an empty page would make an adapter in this state walk to
+    // `maxPagesPerRun` against a live upstream on every run. But the two shapes are not the
+    // same event: handing back documents while claiming no new position is an adapter
+    // contract anomaly, and calling it "caught up" on the run row would bury it.
+    const anomalous = createStallingAdapter({
+      source: 'appstore',
+      page: { documents: [makeDocument('appstore', 'no-advance')], cursor: undefined },
+    });
+    const h = harness([['appstore', 'frozen-cursor']]);
+
+    const report = await runIngest({
+      registry: createSourceRegistry([anomalous]),
+      ...h,
+      maxPagesPerRun: 5,
+    });
+
+    expect(anomalous.callCount()).toBe(1);
+    const counts = countsFor(report, 'appstore');
+    expect(counts.stopReason).toBe('no-progress-with-documents');
+    // No skip risk, so no error and no change of disposition: the cursor was never advanced
+    // and the next run replays from the same position.
+    expect(counts.status).toBe('complete');
+    expect(report.status).toBe('COMPLETE');
+    expect(report.errors).toEqual([]);
+    expect(h.cursors.values.get('appstore')).toBe('frozen-cursor');
+    // The documents it did hand over are still written.
+    expect(h.documents.stored.size).toBe(1);
   });
 
   it('does not treat a partial with no cursor at all as a stall', async () => {
@@ -686,6 +819,37 @@ describe('runIngest — the runs row is always written (criterion 3)', () => {
     expect(recorded?.result.errors[0]?.source).toBeNull();
   });
 
+  it('names every source on the row even when the run dies before reaching most of them', async () => {
+    // Fix round 1, Finding 2. The file header claims every source in SOURCES gets an entry
+    // "even when it was never asked", and this is the path where that used to be false: the
+    // persisted row named only the sources already reached. A FAILED row is the least useful
+    // place to be missing them — it is exactly when an operator needs to tell "this source
+    // ran and found nothing" from "the run died before getting to it".
+    const h = harness();
+    // `hackernews` is first in SOURCES, so it completes; the cursor read then fails for
+    // `appstore` and `reddit` is never reached at all.
+    h.cursors.failOnGetForSource('appstore', new UpstreamError('source_cursors: read failed'));
+    const registry = createSourceRegistry([
+      createFakeAdapter({ source: 'hackernews', pages: [[makeDocument('hackernews', 'first')]] }),
+      createFakeAdapter({ source: 'appstore' }),
+      createFakeAdapter({ source: 'reddit' }),
+    ]);
+
+    await expect(runIngest({ registry, ...h })).rejects.toThrow(/read failed/);
+
+    const counts = h.runs.finished[0]?.result.counts as {
+      bySource: Record<string, SourceIngestCounts>;
+    };
+    expect(Object.keys(counts.bySource).sort()).toEqual(['appstore', 'hackernews', 'reddit']);
+    // The one that finished keeps its real result...
+    expect(counts.bySource.hackernews?.status).toBe('complete');
+    expect(counts.bySource.hackernews?.inserted).toBe(1);
+    // ...and the two that never ran say so, distinctly from a configured-off `skipped`.
+    expect(counts.bySource.appstore?.status).toBe('not-attempted');
+    expect(counts.bySource.reddit?.status).toBe('not-attempted');
+    expect(counts.bySource.reddit?.detail).toContain('run ended before');
+  });
+
   it('surfaces a failure to write the row when nothing else went wrong', async () => {
     const h = harness();
     h.runs.failOnFinish(new UpstreamError('runs: update matched no row'));
@@ -702,5 +866,56 @@ describe('runIngest — the runs row is always written (criterion 3)', () => {
 
     // The original cause propagates; the row-write failure is logged rather than replacing it.
     await expect(runIngest({ registry, ...h })).rejects.toThrow(/the original cause/);
+  });
+});
+
+describe('runIngest — maxPagesPerRun validation', () => {
+  // Fix round 1, Finding 6. `0` is reachable from a caller that computes this value — I-06
+  // is the next task and will wire it — and it used to produce the exact bug shape this
+  // phase has been hunting: every source reported `complete` with `page-limit`, zero
+  // documents, zero errors, and a COMPLETE run that had fetched nothing at all.
+  it('rejects zero rather than reporting a run that fetched nothing as a success', async () => {
+    const h = harness();
+    const adapter = createFakeAdapter({
+      source: 'hackernews',
+      pages: [[makeDocument('hackernews')]],
+    });
+
+    await expect(
+      runIngest({ registry: createSourceRegistry([adapter]), ...h, maxPagesPerRun: 0 }),
+    ).rejects.toThrow(ConfigError);
+
+    // Rejected before the run began, so there is no half-written run row claiming otherwise,
+    // and the adapter was never called.
+    expect(h.runs.started).toEqual([]);
+    expect(h.runs.finished).toEqual([]);
+    expect(adapter.fake.incrementalCallCount()).toBe(0);
+  });
+
+  it('rejects negative and non-integer bounds', async () => {
+    const h = harness();
+    const registry = createSourceRegistry([createFakeAdapter({ source: 'hackernews' })]);
+
+    for (const maxPagesPerRun of [-1, 2.5, Number.NaN]) {
+      await expect(runIngest({ registry, ...h, maxPagesPerRun })).rejects.toThrow(ConfigError);
+    }
+  });
+
+  it('accepts 1 — a deliberately shallow run is not the same as a broken one', async () => {
+    const h = harness();
+    const adapter = createFakeAdapter({
+      source: 'hackernews',
+      pages: [[makeDocument('hackernews', 'page-1')], [makeDocument('hackernews', 'page-2')]],
+    });
+
+    const report = await runIngest({
+      registry: createSourceRegistry([adapter]),
+      ...h,
+      maxPagesPerRun: 1,
+    });
+
+    expect(countsFor(report, 'hackernews').pages).toBe(1);
+    expect(countsFor(report, 'hackernews').stopReason).toBe('page-limit');
+    expect(h.documents.stored.size).toBe(1);
   });
 });

@@ -72,6 +72,12 @@ export interface FakeCursorStore extends CursorStore {
   /** Every cursor `get` handed back, so a test can assert replay is verbatim. */
   readonly reads: { source: Source; cursor: Cursor | undefined }[];
   failOnGet(error: Error | undefined): void;
+  /**
+   * Fails only for one source, so a test can let earlier sources complete and have the run
+   * die partway — the shape that distinguishes "reached and ran" from "never reached" in the
+   * persisted counts.
+   */
+  failOnGetForSource(source: Source, error: Error): void;
 }
 
 export function createFakeCursorStore(initial: Iterable<[Source, Cursor]> = []): FakeCursorStore {
@@ -79,6 +85,7 @@ export function createFakeCursorStore(initial: Iterable<[Source, Cursor]> = []):
   const writes: { source: Source; cursor: Cursor }[] = [];
   const reads: { source: Source; cursor: Cursor | undefined }[] = [];
   let getFailure: Error | undefined;
+  const perSourceGetFailures = new Map<Source, Error>();
 
   return {
     values,
@@ -87,7 +94,14 @@ export function createFakeCursorStore(initial: Iterable<[Source, Cursor]> = []):
     failOnGet(error) {
       getFailure = error;
     },
+    failOnGetForSource(source, error) {
+      perSourceGetFailures.set(source, error);
+    },
     async get(source) {
+      const sourceFailure = perSourceGetFailures.get(source);
+      if (sourceFailure !== undefined) {
+        throw sourceFailure;
+      }
       if (getFailure !== undefined) {
         throw getFailure;
       }

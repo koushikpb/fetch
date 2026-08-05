@@ -12,6 +12,7 @@
 import { inspect } from 'node:util';
 import { z } from 'zod';
 import { ConfigError } from './errors.js';
+import { log } from './log.js';
 
 const REDACTED = '[REDACTED]';
 
@@ -276,21 +277,6 @@ const EnvSchema = z
       );
     }
 
-    // Reddit's non-credential settings are meaningless without the credentials: I-05 drops
-    // the whole Reddit adapter when `reddit` is undefined (blocker B-09 — Reddit blocks
-    // unauthenticated API access), so a configured subreddit list with no credentials would
-    // be silently ignored rather than swept. Fail at boot instead.
-    if (redditPresentCount === 0) {
-      for (const name of ['REDDIT_SUBREDDITS', 'REDDIT_MIN_COMMENTS_TO_EXPAND'] as const) {
-        const value = data[name];
-        if (value !== undefined && value !== '') {
-          ctx.addIssue(
-            `${name} is set but REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT are not — Reddit ingestion cannot run without credentials, so this setting would be silently ignored`,
-          );
-        }
-      }
-    }
-
     if (
       data.REDDIT_MIN_COMMENTS_TO_EXPAND !== undefined &&
       data.REDDIT_MIN_COMMENTS_TO_EXPAND !== ''
@@ -420,6 +406,51 @@ export function loadConfigFromEnv(): Config {
 }
 
 /**
+ * Settings that only mean something once Reddit has credentials. Without them I-05 leaves
+ * the Reddit adapter out of the registry entirely (blocker B-09 — Reddit blocks
+ * unauthenticated API access), so these are read by nothing.
+ *
+ * Fix round 1, Finding 5: this used to be a hard `ConfigError`, which meant deleting Reddit
+ * credentials from a `.env` that still named subreddits stopped Hacker News and App Store
+ * ingestion too — a whole-pipeline outage over a setting for one source. The silence it was
+ * guarding against no longer exists either: the registry records the skip with its reason
+ * and the orchestrator writes that onto every run row. A warning is the proportionate
+ * response, so the two sources that *can* run keep running.
+ *
+ * It lives here rather than in `loadConfig` deliberately: `loadConfig` is pure by contract
+ * ("no global state, no I/O, safe to call with a literal object in tests") and a validator
+ * that writes to stdout would not be. `bootConfig` is already the impure boot-time entry
+ * point — it writes to stderr and calls `process.exit` — so the warning belongs with it.
+ */
+const REDDIT_SETTINGS_NEEDING_CREDENTIALS = [
+  'REDDIT_SUBREDDITS',
+  'REDDIT_MIN_COMMENTS_TO_EXPAND',
+] as const;
+
+function warnAboutUnusableRedditSettings(config: Config, env: NodeJS.ProcessEnv): void {
+  if (config.reddit !== undefined) {
+    return;
+  }
+  const configured = REDDIT_SETTINGS_NEEDING_CREDENTIALS.filter((name) => {
+    const value = env[name];
+    return value !== undefined && value !== '';
+  });
+  if (configured.length === 0) {
+    return;
+  }
+  log.warn(
+    'Reddit settings are configured but Reddit has no credentials, so they will be ignored',
+    {
+      // Names only, never values — the same rule the ConfigError messages follow, and
+      // REDDIT_SUBREDDITS is not a secret but neighbours two that are.
+      ignored: configured,
+      required: ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT'],
+      effect: 'Reddit ingestion is skipped; every other source runs normally',
+    },
+  );
+}
+
+/**
  * Boot-time entry point (SPEC F-03 criterion 1). `loadConfig`/`loadConfigFromEnv` never
  * call `process.exit` themselves — a library that can kill the process is untestable —
  * so this is the one place that catches `ConfigError`, writes its message to stderr, and
@@ -428,7 +459,9 @@ export function loadConfigFromEnv(): Config {
  */
 export function bootConfig(): Config {
   try {
-    return loadConfigFromEnv();
+    const config = loadConfigFromEnv();
+    warnAboutUnusableRedditSettings(config, process.env);
+    return config;
   } catch (err) {
     if (err instanceof ConfigError) {
       process.stderr.write(`${err.message}\n`);
