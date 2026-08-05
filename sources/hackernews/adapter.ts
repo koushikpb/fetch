@@ -205,15 +205,39 @@ interface WindowResult {
  * `[sinceSec, untilSec]` when `sinceInclusive`), hydrating each discovered id via Firebase,
  * and reports exactly how much of that window it can honestly claim as covered.
  *
- * The one subtlety: Algolia's `search_by_date` sorts newest-first with no documented way to
- * reverse that (verified live), so a query whose window has more pages than
- * `maxPagesPerQuery` cannot simply take page 0 onward — the pages closest to `sinceSec` sit
- * at the *end* of that ordering, and skipping them would silently drop the oldest
- * still-unprocessed items in the window while jumping the cursor straight past them,
- * forever. Fetching from the highest page number downward instead means whatever pages this
- * call skips are always the ones nearest `untilSec`, i.e. exactly what the *next* call's
- * window will cover — no gap, no skipped item, just a boundary this call reports honestly
- * instead of overclaiming.
+ * Algolia's `search_by_date` sorts newest-first with no documented way to reverse that
+ * (verified live), so a query whose window has more pages than `maxPagesPerQuery` cannot
+ * simply take page 0 onward — the pages closest to `sinceSec` sit at the *end* of that
+ * ordering, and taking page 0 onward would silently drop the oldest still-unprocessed items
+ * while jumping the cursor straight past them, forever. Fetching from the highest page
+ * number downward instead means whatever pages this call skips are always the ones nearest
+ * `untilSec`, i.e. what a *later* call's window will cover.
+ *
+ * That alone is not quite sufficient, and fix round 1 (review finding, empirically
+ * reproduced) is why: `created_at_i` is a whole-second Unix timestamp, not a unique key, and
+ * Algolia's own sort order gives no guarantee about which side of a page boundary two items
+ * sharing the same second land on. A tie straddling exactly the cutoff between "fetched" and
+ * "not fetched" used to let the reported boundary equal that shared timestamp, which — under
+ * `fetchIncremental`'s *strictly-greater* lower bound (composer resolution 2) — excludes
+ * anything at exactly that timestamp on every subsequent call, forever. The unfetched twin
+ * was gone with no error, no log, and no way for a later run to ever reach it again.
+ *
+ * The fix (composer resolution, fix round 1): when capped, the boundary this call claims is
+ * never the maximum `created_at_i` actually fetched — it is the *second-highest distinct*
+ * value fetched. Any value strictly below the maximum is provably safe to claim, because the
+ * fetched pages are a contiguous, closest-to-`sinceSec` chunk of the query's globally sorted
+ * result set: nothing smaller than what we fetched could possibly have been excluded. Only
+ * the single highest value sits at the actual cut point and could have an unfetched twin
+ * beyond it, so it is always left for a later call to re-cover in full — together with
+ * anything else sharing that exact second, fetched or not. This is "err toward re-fetching,
+ * never toward skipping": a duplicate costs one wasted request (`documents`'s
+ * `(source, source_id)` uniqueness and I-05's dedup absorb it for free); a skip is permanent
+ * and CLAUDE.md rule 1 does not tolerate it. If literally every item this call fetched for a
+ * query shares one exact second (no distinct lower value exists to retreat to — unreachable
+ * at the default 20-page/1000-hitsPerPage cap, which would require >20,000 items in one
+ * second of Hacker News activity), that query contributes no progress this call rather than
+ * an unsafe one; see the boundary-tie test in tests/sources/hackernews/adapter.test.ts for
+ * the reproduction this closes.
  */
 async function collectWindow(
   net: NetClient,
@@ -242,14 +266,27 @@ async function collectWindow(
         : Array.from({ length: totalPages }, (_, p) => p);
 
       // Only tracked when capped — an uncapped query's boundary is trivially `untilSec`
-      // because every one of its pages was walked.
-      let queryMaxSeenSec = sinceSec;
+      // because every one of its pages was walked. `maxSeenSec` is the highest
+      // `created_at_i` fetched; `secondMaxSeenSec` is the highest *distinct* value strictly
+      // below it. The claimed boundary is the latter, never the former — see the doc
+      // comment above collectWindow (fix round 1) for why the maximum alone is unsafe.
+      let maxSeenSec = sinceSec;
+      let secondMaxSeenSec = sinceSec;
 
       for (const page of pages) {
         const result = page === 0 ? first : await algoliaSearch(net, query, numericFilters, hitsPerPage, page);
         for (const hit of result.hits) {
           if (capped) {
-            queryMaxSeenSec = Math.max(queryMaxSeenSec, hit.created_at_i);
+            if (hit.created_at_i > maxSeenSec) {
+              secondMaxSeenSec = maxSeenSec;
+              maxSeenSec = hit.created_at_i;
+            } else if (hit.created_at_i < maxSeenSec && hit.created_at_i > secondMaxSeenSec) {
+              // Strictly between `secondMaxSeenSec` and `maxSeenSec` — a new second-highest.
+              // An item exactly equal to `maxSeenSec` (its tie sibling) deliberately takes
+              // neither branch: ties at the top never promote `secondMaxSeenSec`, which is
+              // exactly what keeps the whole tied cohort excluded from this call's claim.
+              secondMaxSeenSec = hit.created_at_i;
+            }
           }
           if (seenIds.has(hit.objectID)) {
             continue;
@@ -266,7 +303,7 @@ async function collectWindow(
         // The overall boundary this call can honestly report is the minimum across every
         // query's own boundary — claiming any more would mean trusting a query that was
         // capped short as if it had been fully walked.
-        confirmedThroughSec = Math.min(confirmedThroughSec, queryMaxSeenSec);
+        confirmedThroughSec = Math.min(confirmedThroughSec, secondMaxSeenSec);
       }
     }
     return { documents, confirmedThroughSec };
