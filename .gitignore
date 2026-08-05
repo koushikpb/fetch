@@ -7,3 +7,14 @@ coverage/
 .env.local
 .env.*.local
 .DS_Store
+
+# Agent scratch space. `.claude/worktrees/` holds full per-task checkouts —
+# each is its own working tree with its own node_modules, so this is over a
+# gigabyte of nested clones that must never enter history.
+.claude/
+.superpowers/
+
+# Manual Phase 0 smoke test (see the README section on smoke testing).
+# Untracked on purpose: it talks to a live database and a real socket, so it
+# is a local tool rather than part of the `pnpm verify` gate.
+smoke.ts
