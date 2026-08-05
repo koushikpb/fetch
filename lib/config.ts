@@ -13,6 +13,7 @@ import { inspect } from 'node:util';
 import { z } from 'zod';
 import { ConfigError } from './errors.js';
 import { log } from './log.js';
+import { SOURCES, type Source } from './types.js';
 
 const REDACTED = '[REDACTED]';
 
@@ -53,12 +54,47 @@ export interface AppStoreConfig {
   readonly territories: readonly string[] | undefined;
 }
 
+/**
+ * When ingestion runs, and what a failed run is allowed to do about it (SPEC I-06). Every
+ * field here is settings rather than code specifically because the criterion is that an
+ * operator can change *when* a source runs without editing a `.ts` file and without a
+ * redeploy — a cron string living in a TypeScript module named "config" would not satisfy
+ * that, so these route through the same env → `loadConfig` → `Config` path as everything
+ * else in this file.
+ */
+export interface SchedulerConfig {
+  /**
+   * Per source, because the three do not warrant the same cadence: Hacker News is free and
+   * unmetered, the App Store's RSS feeds are free but refresh slowly, and Reddit is capped
+   * at 100 QPM. `undefined` means that source's schedule is switched off — distinct from
+   * "not configured", which takes the default below. jobs/ *unschedules* an `undefined`
+   * source rather than merely skipping it, since pg-boss persists schedules in the database
+   * and a previously-registered cron keeps firing otherwise.
+   */
+  readonly cron: Readonly<Record<Source, string | undefined>>;
+  /** IANA zone the cron expressions are interpreted in. UTC by default (CLAUDE.md: UTC, always). */
+  readonly timezone: string;
+  /** How many times a failed run is retried before it is given up on and dead-lettered. */
+  readonly retryLimit: number;
+  /** Delay before the first retry; doubles (with jitter) per attempt up to `retryDelayMaxSeconds`. */
+  readonly retryDelaySeconds: number;
+  readonly retryDelayMaxSeconds: number;
+  /**
+   * How long one run may hold its queue's slot before pg-boss reclaims the job. This is the
+   * one setting that can defeat the per-source lock: a run still executing past its expiry
+   * has already lost its `active` claim, so a retry may start alongside it. Generous by
+   * default and configurable for exactly that reason.
+   */
+  readonly jobExpirySeconds: number;
+}
+
 interface ConfigFields {
   readonly databaseUrl: string;
   readonly anthropicApiKey: string;
   readonly reddit: RedditConfig | undefined;
   readonly hackernews: HackerNewsConfig;
   readonly appstore: AppStoreConfig;
+  readonly scheduler: SchedulerConfig;
   readonly budgetCeilingUsd: number;
   readonly logLevel: LogLevel;
   readonly nodeEnv: NodeEnv;
@@ -69,6 +105,83 @@ interface ConfigFields {
 const DEFAULT_BUDGET_CEILING_USD = 70;
 const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 const DEFAULT_NODE_ENV: NodeEnv = 'development';
+
+/** The literal that switches a source's schedule off, as opposed to leaving it defaulted. */
+const SCHEDULE_DISABLED = 'off';
+
+const SCHEDULE_ENV_VARS = {
+  hackernews: 'INGEST_SCHEDULE_HACKERNEWS',
+  appstore: 'INGEST_SCHEDULE_APPSTORE',
+  reddit: 'INGEST_SCHEDULE_REDDIT',
+} as const satisfies Readonly<Record<Source, string>>;
+
+/**
+ * Cadence defaults, one per source, chosen from what each platform actually gives back
+ * rather than from one interval imposed on all three:
+ *
+ * - Hacker News (Algolia + Firebase, free and unmetered) turns over continuously, so a short
+ *   interval keeps each run small; the persisted cursor means frequency changes how the same
+ *   volume is *divided*, not how much is fetched.
+ * - The App Store's RSS review feeds are CDN-cached and refresh far more slowly than hourly,
+ *   so polling harder returns the same page twice for nothing.
+ * - Reddit is capped at 100 QPM and, per CLAUDE.md global rule 4, is designed for
+ *   personal-use limits until a license exists — restraint is the point, not throughput.
+ *
+ * The three minute offsets are deliberate. Identical minutes would put all three sources on
+ * the same tick, contending on one connection pool for no benefit, and would make an
+ * overlapping-run bug hardest to see precisely when it is most likely to happen.
+ */
+const DEFAULT_SCHEDULE_CRON = {
+  hackernews: '*/15 * * * *',
+  appstore: '17 * * * *',
+  reddit: '37 * * * *',
+} as const satisfies Readonly<Record<Source, string>>;
+
+const DEFAULT_SCHEDULE_TIMEZONE = 'UTC';
+/** Three retries after the first attempt. */
+const DEFAULT_RETRY_LIMIT = 3;
+const DEFAULT_RETRY_DELAY_SECONDS = 60;
+/**
+ * Caps the backoff below the shortest default cadence, so a retry chain for one source
+ * cannot still be waiting when that source's next scheduled tick arrives.
+ */
+const DEFAULT_RETRY_DELAY_MAX_SECONDS = 900;
+const DEFAULT_JOB_EXPIRY_SECONDS = 3600;
+
+/**
+ * Deliberately shallow: it checks the field *count* and rejects characters no cron field can
+ * contain, and leaves the rest to the cron parser pg-boss registers the schedule with.
+ *
+ * The split is not arbitrary. pg-boss rejects a garbage field ("Invalid characters, got
+ * value: a") but was verified to accept a four-field expression silently, which is the
+ * realistic typo: a four-field expression is not rejected anywhere downstream, it simply
+ * means something other than what whoever typed it intended, forever. Counting fields catches
+ * that. Going further — validating ranges, or rejecting `L`/`#`/`W` — would risk rejecting
+ * expressions the parser accepts, trading a silent misfire for a boot that refuses a valid
+ * schedule.
+ */
+const CRON_FIELD_PATTERN = /^[0-9A-Za-z*,\-/?#LW]+$/;
+const CRON_FIELD_COUNT = 5;
+
+function isCronExpression(value: string): boolean {
+  const fields = value.trim().split(/\s+/);
+  return fields.length === CRON_FIELD_COUNT && fields.every((f) => CRON_FIELD_PATTERN.test(f));
+}
+
+/**
+ * `Intl` is the check rather than a list of zone names because it is the same database the
+ * runtime resolves the zone against. pg-boss was verified to accept an unknown zone without
+ * complaint, so nothing downstream catches this.
+ */
+function isTimeZone(value: string): boolean {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions().timeZone !== '';
+  } catch {
+    // An unknown zone is a RangeError out of the constructor — the answer to "is this a
+    // zone?" is no, which is a result, not a swallowed failure.
+    return false;
+  }
+}
 
 // Fix round 1, Finding 1 (CRITICAL): the previous version assigned the secret fields via
 // `this.foo = fields.foo`, which makes them ordinary own enumerable data properties —
@@ -148,6 +261,7 @@ export class Config implements ConfigFields {
   declare readonly reddit: RedditConfig | undefined;
   readonly hackernews: HackerNewsConfig;
   readonly appstore: AppStoreConfig;
+  readonly scheduler: SchedulerConfig;
   readonly budgetCeilingUsd: number;
   readonly logLevel: LogLevel;
   readonly nodeEnv: NodeEnv;
@@ -165,6 +279,7 @@ export class Config implements ConfigFields {
     );
     this.hackernews = fields.hackernews;
     this.appstore = fields.appstore;
+    this.scheduler = fields.scheduler;
     this.budgetCeilingUsd = fields.budgetCeilingUsd;
     this.logLevel = fields.logLevel;
     this.nodeEnv = fields.nodeEnv;
@@ -210,6 +325,7 @@ function redactedView(config: ConfigFields): Record<string, unknown> {
           },
     hackernews: config.hackernews,
     appstore: config.appstore,
+    scheduler: config.scheduler,
     budgetCeilingUsd: config.budgetCeilingUsd,
     logLevel: config.logLevel,
     nodeEnv: config.nodeEnv,
@@ -223,6 +339,35 @@ function isPostgresUrl(value: string): boolean {
   } catch {
     // Malformed input (no scheme, empty string, etc.) — not a postgres URL either way.
     return false;
+  }
+}
+
+/**
+ * Structural rather than zod's own context type so these two helpers stay independent of
+ * which zod version's issue API is in play — they only ever add a hand-written message,
+ * which is the same secret-free discipline every other issue in this file follows.
+ */
+interface IssueCollector {
+  addIssue(message: string): void;
+}
+
+/** `undefined`/empty means "not configured" everywhere in this file, so it defers to `fallback`. */
+function optionalInteger(raw: string | undefined, fallback: number): number {
+  return raw === undefined || raw === '' ? fallback : Number(raw);
+}
+
+function checkInteger(
+  ctx: IssueCollector,
+  name: string,
+  raw: string | undefined,
+  minimum: number,
+): void {
+  if (raw === undefined || raw === '') {
+    return;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < minimum) {
+    ctx.addIssue(`${name} must be an integer of at least ${String(minimum)}`);
   }
 }
 
@@ -243,6 +388,14 @@ const EnvSchema = z
     HN_QUERIES: z.string().optional(),
     APPSTORE_APP_IDS: z.string().optional(),
     APPSTORE_TERRITORIES: z.string().optional(),
+    INGEST_SCHEDULE_HACKERNEWS: z.string().optional(),
+    INGEST_SCHEDULE_APPSTORE: z.string().optional(),
+    INGEST_SCHEDULE_REDDIT: z.string().optional(),
+    INGEST_SCHEDULE_TIMEZONE: z.string().optional(),
+    INGEST_RETRY_LIMIT: z.string().optional(),
+    INGEST_RETRY_DELAY_SECONDS: z.string().optional(),
+    INGEST_RETRY_DELAY_MAX_SECONDS: z.string().optional(),
+    INGEST_JOB_EXPIRY_SECONDS: z.string().optional(),
     BUDGET_CEILING_USD: z.string().optional(),
     LOG_LEVEL: z.string().optional(),
     NODE_ENV: z.string().optional(),
@@ -287,6 +440,49 @@ const EnvSchema = z
       }
     }
 
+    for (const source of SOURCES) {
+      const name = SCHEDULE_ENV_VARS[source];
+      const raw = data[name];
+      if (raw === undefined || raw === '' || raw.trim().toLowerCase() === SCHEDULE_DISABLED) {
+        continue;
+      }
+      if (!isCronExpression(raw)) {
+        ctx.addIssue(
+          `${name} must be a five-field cron expression (minute hour day-of-month month day-of-week) or "${SCHEDULE_DISABLED}"`,
+        );
+      }
+    }
+
+    if (
+      data.INGEST_SCHEDULE_TIMEZONE !== undefined &&
+      data.INGEST_SCHEDULE_TIMEZONE !== '' &&
+      !isTimeZone(data.INGEST_SCHEDULE_TIMEZONE)
+    ) {
+      ctx.addIssue(
+        'INGEST_SCHEDULE_TIMEZONE must be an IANA time zone name (e.g. UTC, Europe/London)',
+      );
+    }
+
+    // `retryLimit` is the only one that may be 0 — that is "attempt once, never retry",
+    // a legitimate choice. A zero anywhere else would mean an interval that is not one.
+    checkInteger(ctx, 'INGEST_RETRY_LIMIT', data.INGEST_RETRY_LIMIT, 0);
+    checkInteger(ctx, 'INGEST_RETRY_DELAY_SECONDS', data.INGEST_RETRY_DELAY_SECONDS, 1);
+    checkInteger(ctx, 'INGEST_RETRY_DELAY_MAX_SECONDS', data.INGEST_RETRY_DELAY_MAX_SECONDS, 1);
+    checkInteger(ctx, 'INGEST_JOB_EXPIRY_SECONDS', data.INGEST_JOB_EXPIRY_SECONDS, 1);
+
+    // Caught here rather than left to pg-boss, which clamps each delay to the maximum and so
+    // turns an inverted pair into a fixed-delay retry policy that silently is not backoff.
+    const delay = optionalInteger(data.INGEST_RETRY_DELAY_SECONDS, DEFAULT_RETRY_DELAY_SECONDS);
+    const maxDelay = optionalInteger(
+      data.INGEST_RETRY_DELAY_MAX_SECONDS,
+      DEFAULT_RETRY_DELAY_MAX_SECONDS,
+    );
+    if (Number.isInteger(delay) && Number.isInteger(maxDelay) && maxDelay < delay) {
+      ctx.addIssue(
+        'INGEST_RETRY_DELAY_MAX_SECONDS must be greater than or equal to INGEST_RETRY_DELAY_SECONDS — a smaller maximum clamps every retry to one fixed delay, which is not backoff',
+      );
+    }
+
     if (data.BUDGET_CEILING_USD !== undefined) {
       const parsed = Number(data.BUDGET_CEILING_USD);
       if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -327,6 +523,38 @@ function parseList(value: string | undefined): readonly string[] | undefined {
 
 type ValidatedEnv = z.infer<typeof EnvSchema>;
 
+function toSchedulerConfig(env: ValidatedEnv): SchedulerConfig {
+  const cron: Record<Source, string | undefined> = {
+    hackernews: undefined,
+    appstore: undefined,
+    reddit: undefined,
+  };
+  for (const source of SOURCES) {
+    const raw = env[SCHEDULE_ENV_VARS[source]];
+    if (raw === undefined || raw === '') {
+      cron[source] = DEFAULT_SCHEDULE_CRON[source];
+    } else if (raw.trim().toLowerCase() === SCHEDULE_DISABLED) {
+      cron[source] = undefined;
+    } else {
+      cron[source] = raw.trim();
+    }
+  }
+  return {
+    cron,
+    timezone:
+      env.INGEST_SCHEDULE_TIMEZONE === undefined || env.INGEST_SCHEDULE_TIMEZONE === ''
+        ? DEFAULT_SCHEDULE_TIMEZONE
+        : env.INGEST_SCHEDULE_TIMEZONE,
+    retryLimit: optionalInteger(env.INGEST_RETRY_LIMIT, DEFAULT_RETRY_LIMIT),
+    retryDelaySeconds: optionalInteger(env.INGEST_RETRY_DELAY_SECONDS, DEFAULT_RETRY_DELAY_SECONDS),
+    retryDelayMaxSeconds: optionalInteger(
+      env.INGEST_RETRY_DELAY_MAX_SECONDS,
+      DEFAULT_RETRY_DELAY_MAX_SECONDS,
+    ),
+    jobExpirySeconds: optionalInteger(env.INGEST_JOB_EXPIRY_SECONDS, DEFAULT_JOB_EXPIRY_SECONDS),
+  };
+}
+
 // Only reachable once `EnvSchema`'s superRefine above has already confirmed every field is
 // well-formed, so the coercions here (Number(...), the literal casts) cannot fail — this
 // function's job is exclusively to apply defaults and build the typed `Config`, not to
@@ -362,6 +590,7 @@ function toConfig(env: ValidatedEnv): Config {
       appIds: parseList(env.APPSTORE_APP_IDS),
       territories: parseList(env.APPSTORE_TERRITORIES),
     },
+    scheduler: toSchedulerConfig(env),
     budgetCeilingUsd:
       env.BUDGET_CEILING_USD === undefined
         ? DEFAULT_BUDGET_CEILING_USD
