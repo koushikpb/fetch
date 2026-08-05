@@ -49,11 +49,36 @@
 // sources/types.ts), and caps the default project at 8 distinct matched files per process.
 // Those three restrictions rule out a directory-shaped glob here (every such shape in this
 // repo already has a real `types.ts` in it) and rule out one fake path per test case, so
-// this lists the small, fixed set of exact virtual paths tests/eslint-rules.test.ts reuses
-// across many `lintText` calls. A prohibition test added by a later task needs either one
-// of these paths, or a real on-disk path (which needs no entry here at all — see how the
-// lib/errors.ts and tests/errors.test.ts override tests below reuse real paths), or its
-// own new allowDefaultProject entry.
+// ALLOW_DEFAULT_PROJECT_CANDIDATES below lists the small, fixed set of exact virtual paths
+// tests/eslint-rules.test.ts reuses across many `lintText` calls.
+//
+// The second of those three restrictions is what turned R-02 into an outage: an entry stops
+// being a virtual fixture the moment some later task creates a real file at that path (F-04
+// did this for lib/net.ts, F-05 for lib/llm.ts), and typescript-eslint then hard-errors on
+// *every* file — "was included by allowDefaultProject but also was found in the project
+// service" — because the entry now collides with the real project covering that same path.
+// A fixed array made this a manual invariant that three tasks in a row tripped over, since
+// nothing forced whoever added lib/net.ts to remember an unrelated line in this config file.
+// So `allowDefaultProject` below is *derived*, not the candidate list itself: it filters the
+// candidates down to whichever ones `existsSync` still finds absent from disk, at the moment
+// eslint.config.js is loaded (i.e. on every `eslint` invocation, not just when this file is
+// edited). A candidate is a virtual fixture exactly while its file doesn't exist yet, and the
+// instant a task creates that file, this filter drops the now-stale entry on its own — no
+// future task can trip this again, and the resolved-real-file case (already proven by the
+// lib/net.ts and lib/llm.ts lintText cases below) is exercised on every candidate the moment
+// it graduates rather than only after someone remembers to edit this list.
+// Candidates are resolved against `import.meta.dirname`, consistent with `tsconfigRootDir`
+// below — a bare relative path would resolve against the process cwd instead, which is not
+// guaranteed to be this file's directory. The candidate list stays an explicit, readable
+// array rather than something computed or hidden, since the point is to remove the
+// maintenance burden of deleting stale entries, not to obscure which paths are virtual;
+// filtering only ever shrinks it, so the 8-distinct-matched-file cap mentioned above still
+// holds trivially. A prohibition test added by a later task needs either one of the
+// still-virtual candidates below, or a real on-disk path (which needs no entry here at all —
+// see how the lib/errors.ts and tests/errors.test.ts override tests below reuse real paths),
+// or its own new candidate entry.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import tseslint from 'typescript-eslint';
 import prettierConfig from 'eslint-config-prettier';
 
@@ -62,6 +87,18 @@ const LLM_WRAPPER = 'lib/llm.ts';
 const ERRORS_MODULE = 'lib/errors.ts';
 const CONFIG_MODULE = 'lib/config.ts';
 const TESTS_GLOB = 'tests/**';
+
+const ALLOW_DEFAULT_PROJECT_CANDIDATES = [
+  NET_WRAPPER,
+  LLM_WRAPPER,
+  'sources/example.ts',
+  'sources/hackernews/example.ts',
+  'sources/reddit/example.ts',
+];
+
+const allowDefaultProject = ALLOW_DEFAULT_PROJECT_CANDIDATES.filter(
+  (candidate) => !existsSync(join(import.meta.dirname, candidate)),
+);
 
 const BUILTIN_ERROR_CTORS =
   '/^(Error|TypeError|RangeError|SyntaxError|ReferenceError|EvalError|URIError|AggregateError)$/';
@@ -113,13 +150,7 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: [
-            'lib/net.ts',
-            'lib/llm.ts',
-            'sources/example.ts',
-            'sources/hackernews/example.ts',
-            'sources/reddit/example.ts',
-          ],
+          allowDefaultProject,
         },
         tsconfigRootDir: import.meta.dirname,
       },
