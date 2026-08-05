@@ -4,8 +4,11 @@
 // directly anywhere outside this file, so AppError and its subclasses are the only route
 // to a throwable error object elsewhere in the repo.
 //
-// Composer resolution (task-F-06-brief.md #2): exactly the five subclasses below exist.
-// Later tasks add their own as they need them — do not pre-create speculative ones here.
+// Composer resolution (task-F-06-brief.md #2): exactly five subclasses existed at that
+// task's completion. R-04 (task-R-04-brief.md #1) lifted that constraint for one further
+// case — an exhausted 5xx needed its own class to settle lib/net.ts's terminal-failure
+// contract — so six exist now. Later tasks add their own as they need them — do not
+// pre-create speculative ones here.
 // The base class is named AppError, not FetchError, per resolution #1: CLAUDE.md forbids
 // the project name as a code identifier.
 
@@ -55,6 +58,17 @@ export class TimeoutError extends AppError {
 export class RateLimitError extends AppError {
   constructor(message: string, options: AppErrorOptions = {}) {
     super('RATE_LIMIT_ERROR', message, options);
+  }
+}
+
+// Named for what happened (the upstream gave up), not for the wire shape that revealed it
+// — composer resolution (task-R-04-brief.md #1). lib/net.ts throws this once retries are
+// exhausted on a 5xx, mirroring RateLimitError's treatment of an exhausted 429: both are
+// this module giving up, not a definitive server answer, so both become catchable errors
+// rather than a Response the caller must remember to inspect.
+export class UpstreamError extends AppError {
+  constructor(message: string, options: AppErrorOptions = {}) {
+    super('UPSTREAM_ERROR', message, options);
   }
 }
 
