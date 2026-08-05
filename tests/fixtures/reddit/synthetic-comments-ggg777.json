@@ -1,0 +1,34 @@
+[
+  {
+    "kind": "Listing",
+    "data": { "children": [{ "kind": "t3", "data": { "id": "ggg777", "name": "t3_ggg777" } }] }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "ch1",
+            "name": "t1_ch1",
+            "author": "polite_nudger",
+            "author_fullname": "t2_placeholder08",
+            "body": "I send one reminder at day 3 and one at day 10, both from a template. Anything more feels aggressive.",
+            "created_utc": 1740831000,
+            "score": 17,
+            "parent_id": "t3_ggg777",
+            "link_id": "t3_ggg777",
+            "subreddit": "partialtest",
+            "subreddit_id": "t5_2qh0m",
+            "stickied": false,
+            "score_hidden": false,
+            "controversiality": 0,
+            "depth": 0,
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]

@@ -14,9 +14,10 @@
 // `netClient` — the ready instance production code imports.
 import { AppError } from '../lib/errors.js';
 import type { Source } from '../lib/types.js';
-import type { SourceAdapter } from './types.js';
 import { createAppStoreAdapter } from './appstore/adapter.js';
 import { createHackerNewsAdapter } from './hackernews/adapter.js';
+import { createRedditAdapter } from './reddit/adapter.js';
+import type { SourceAdapter } from './types.js';
 
 export interface SourceRegistry {
   /**
@@ -69,13 +70,19 @@ export function createSourceRegistry(adapters: readonly SourceAdapter[]): Source
 }
 
 /**
- * The production registry ingest code imports. Empty until I-02/I-03/I-04 land — this task
- * builds the seam, not the adapters that plug into it (SPEC I-01: "do not implement any
- * real adapter"). Each of those tasks adds its adapter to this array as it lands; nothing
- * else in the repo should construct its own registry outside tests, which use
- * `createSourceRegistry` directly with fakes instead of mutating this shared instance.
+ * The production registry ingest code imports. Nothing else in the repo should construct its
+ * own registry outside tests, which use `createSourceRegistry` directly with fakes instead of
+ * mutating this shared instance.
+ *
+ * Every adapter here is currently built with its own defaults, which means every one of them
+ * is inert — Reddit in particular cannot fetch anything without credentials. That is a
+ * consequence of wave 3's "exactly two lines of this file" rule, which was what let the three
+ * adapters be written concurrently without a three-way collision. I-05 replaces this with a
+ * `createRegistry(config)` factory, following the `createDb(connectionString)` /
+ * `createNetClient(options)` pattern the rest of the codebase already uses.
  */
 export const registry: SourceRegistry = createSourceRegistry([
   createAppStoreAdapter(),
   createHackerNewsAdapter(),
+  createRedditAdapter(),
 ]);

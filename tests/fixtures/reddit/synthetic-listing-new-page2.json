@@ -1,0 +1,28 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "before": "t3_bbb222",
+    "dist": 1,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "ccc333",
+          "name": "t3_ccc333",
+          "title": "On-call tooling for tiny teams (2 people)?",
+          "selftext": "PagerDuty and Opsgenie both price by seat in a way that makes them absurd for a two-person team.",
+          "author": "lonely_pager",
+          "created_utc": 1739611800,
+          "score": 215,
+          "num_comments": 5,
+          "upvote_ratio": 0.91,
+          "subreddit": "testsub",
+          "permalink": "/r/testsub/comments/ccc333/oncall_tooling_for_tiny_teams/",
+          "over_18": false,
+          "is_self": true
+        }
+      }
+    ]
+  }
+}
