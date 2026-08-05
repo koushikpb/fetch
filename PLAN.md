@@ -36,8 +36,8 @@ whose `PLAN.md` entry is missing is not done.
 ## Current state
 
 **Phase:** 1 — Ingestion
-**Active tasks:** R-04, R-05 (wave 1 — both clear blockers)
-**Next up:** I-01, once the net contract is settled
+**Active tasks:** I-01 (wave 2)
+**Next up:** I-02 ∥ I-03 ∥ I-04 — the three adapters, in parallel
 
 **Phase 0 shipped.** PR #1 merged to `main` on 2026-08-05 as `eced880` — six `SPEC.md` tasks
 plus three composer-created reconciliation tasks, 221 tests green.
@@ -89,9 +89,9 @@ a time with `pnpm verify` re-run after each merge.
 
 | ID | Task | Status | Blockers | Assigned | Notes |
 |---|---|---|---|---|---|
-| R-04 | Settle `lib/net.ts` terminal-failure contract | WIP | F-04 | — | Composer-created; clears **B-06** before three adapters build on it |
-| R-05 | Make TypeScript entry points runnable | WIP | F-01 | — | Composer-created; clears **B-05**, authorizes `tsx`, adds `pnpm smoke` |
-| I-01 | `SourceAdapter` interface and registry | TODO | F-04, F-06, R-04 | — | Interface quality determines cost of every future source |
+| R-04 | Settle `lib/net.ts` terminal-failure contract | DONE | F-04 | — | `944b979` — clears **B-06**; review clean first pass |
+| R-05 | Make TypeScript entry points runnable | DONE | F-01 | — | `7b201a1` (1 fix round) — clears **B-05**; adds `db:migrate`, `db:seed`, `pnpm smoke` |
+| I-01 | `SourceAdapter` interface and registry | WIP | F-04, F-06, R-04 | — | Interface quality determines cost of every future source |
 | I-02 | Hacker News adapter | TODO | I-01 | — | Free and unmetered — develop against this one first |
 | I-03 | App Store reviews adapter | TODO | I-01 | — | |
 | I-04 | Reddit adapter | TODO | I-01 | — | 100 QPM hard limit |
@@ -164,8 +164,8 @@ condition, the task it blocks, and what would resolve it.*
 | B-03 | C-04 | No labeled saturated-market examples | Identify ≥5 clusters with known mature solutions for negative testing |
 | B-04 | X-01, X-02 | **No embedding provider is named anywhere in the spec or stack table, and Anthropic does not offer an embeddings API.** The whole cost thesis rests on the embedding prefilter, so this is a load-bearing gap, not a detail | Choose a provider and model, add it to the stack table, and price it at 50k documents/month against the $70 ceiling. F-02 pins the vector column at `1536` as a placeholder; a different model means a forward migration |
 | B-07 | first CI setup, or a second contributor | **Test scratch-database provisioning hardcodes the Postgres role `nick`** (`tests/db/scratch-database.ts`). `pnpm verify` cannot run in any environment lacking that exact role. The natural fix — an env-var override — is blocked because `eslint.config.js` deliberately keeps the `process.env` ban active for `tests/**`, asserted by its own test | Composer ruling: **deferred**, not forgotten. No CI exists and this is a single-contributor repo, so nothing breaks today, and the sharper half of the risk (two files duplicating the provisioning block, free to drift) is already fixed. Unblocking it means widening a deliberate ban across `eslint.config.js` and a test helper as a matched pair — do that when a second environment actually exists, not speculatively |
-| B-06 | I-02, I-04 | **`lib/net.ts`'s terminal-failure contract is asymmetric.** An exhausted 429 throws `RateLimitError`, but an exhausted 5xx returns the raw `Response`. An adapter author must therefore branch on `response.status >= 500` *in addition* to catching typed errors, or a persistently-failing upstream silently reads as "got a response" | Settle it in **I-01**, when the `SourceAdapter` consumer contract is designed and we know what adapters actually need. Either add an `HttpStatusError` to `lib/errors.ts` and throw symmetrically, or make returning the response the documented contract for every non-retryable status including 429 |
-| B-05 | I-05, I-06 | **Nothing can run a TypeScript entry point.** F-02 had to delete its `db:migrate` and `db:seed` scripts: bare `node <file>.ts` cannot resolve this repo's `.js`-import-specifier-to-`.ts`-file convention outside vitest's transform. The seed script is tested but not operationally invokable | A small task adding a runner (`tsx`, or `node --experimental-strip-types` with matching resolution settings), or a change to F-01's module resolution. Needed before any scheduled or CLI-invoked pipeline stage exists |
+| ~~B-06~~ | ~~I-02, I-04~~ | **RESOLVED 2026-08-05 by R-04 (`944b979`).** ~~`lib/net.ts`'s terminal-failure contract is asymmetric.~~ An exhausted 429 throws `RateLimitError`, but an exhausted 5xx returns the raw `Response`. An adapter author must therefore branch on `response.status >= 500` *in addition* to catching typed errors, or a persistently-failing upstream silently reads as "got a response" | Settle it in **I-01**, when the `SourceAdapter` consumer contract is designed and we know what adapters actually need. Either add an `HttpStatusError` to `lib/errors.ts` and throw symmetrically, or make returning the response the documented contract for every non-retryable status including 429 |
+| ~~B-05~~ | ~~I-05, I-06~~ | **RESOLVED 2026-08-05 by R-05 (`7b201a1`).** ~~Nothing can run a TypeScript entry point.~~ F-02 had to delete its `db:migrate` and `db:seed` scripts: bare `node <file>.ts` cannot resolve this repo's `.js`-import-specifier-to-`.ts`-file convention outside vitest's transform. The seed script is tested but not operationally invokable | A small task adding a runner (`tsx`, or `node --experimental-strip-types` with matching resolution settings), or a change to F-01's module resolution. Needed before any scheduled or CLI-invoked pipeline stage exists |
 
 These three are human-input blockers, not agent-solvable. They gate the phases where
 quality actually matters, so front-load them — start labeling during Phase 0 or 1 rather
