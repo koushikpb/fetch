@@ -13,8 +13,3 @@ coverage/
 # gigabyte of nested clones that must never enter history.
 .claude/
 .superpowers/
-
-# Manual Phase 0 smoke test (see the README section on smoke testing).
-# Untracked on purpose: it talks to a live database and a real socket, so it
-# is a local tool rather than part of the `pnpm verify` gate.
-smoke.ts
