@@ -376,6 +376,233 @@ describe('eslint prohibitions (F-06 criterion 2, part 2: no bare rethrow-and-swa
   });
 });
 
+describe('eslint prohibitions (I-01 criterion 3: adapters are only reachable through the registry)', () => {
+  it('reports importing sources/hackernews/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews/adapter.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  it('reports importing sources/appstore/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "import { x } from './appstore/adapter.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  it('reports importing sources/reddit/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "import { x } from './reddit/adapter.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // The ban is location-independent (a regex over the specifier text, not a set of glob
+  // shapes tied to the importer's own depth) — this proves it fires from a file nowhere
+  // near sources/ too, using an existing real on-disk path so no new allowDefaultProject
+  // entry is needed (lintText's `code` argument overrides whatever is really there).
+  it('reports a deep adapter import from a file outside sources/ entirely', async () => {
+    const ruleIds = await lint(
+      "import { x } from '../sources/reddit/adapter.js';\nexport const y = x;\n",
+      'tests/errors.test.ts',
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // Exercises the `(/|$)` end-of-string branch specifically, not just the `/` branch every
+  // case above already covers — a bare directory import with no trailing file segment.
+  it('reports a bare directory import with no trailing file (./hackernews, no extension)', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // Boundary check: a same-named file that merely starts with one of the banned words must
+  // not false-positive — the regex requires a `/` or string boundary on both sides, so this
+  // proves it discriminates a directory *segment* from a filename that happens to start the
+  // same way (mirrors this file's PROCESS_ENV_BAN bracket-notation boundary tests above).
+  it('does not false-positive on a same-named file that is not the adapter directory', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews-utils.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).not.toContain('no-restricted-imports');
+  });
+
+  it('does not report a deep adapter import inside sources/registry.ts', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews/adapter.js';\nexport const y = x;\n",
+      'sources/registry.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-imports');
+  });
+
+  // Fix-round-1-style regression guard (see the F-06/F-03 overrides above): the
+  // sources/registry.ts exemption redefines `no-restricted-imports` with only
+  // ADAPTER_DEEP_IMPORT_BAN dropped, not the whole rule turned off — this proves the
+  // @anthropic-ai/sdk ban still applies there.
+  it('still reports an @anthropic-ai/sdk import inside sources/registry.ts — the exemption is deep-adapter-import-only', async () => {
+    const ruleIds = await lint(
+      "import Anthropic from '@anthropic-ai/sdk';\nexport const client = new Anthropic();\n",
+      'sources/registry.ts',
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // Fix round 1, Finding 1 (CRITICAL): the sources/registry.ts exemption above was the
+  // *only* one that existed — tests/** inherited the base ban unmodified, leaving I-02/
+  // I-03/I-04 with nowhere to unit-test their own adapter module directly. Reviewer-verified
+  // failure mode before this fix: a tests/sources/hackernews/adapter.test.ts importing
+  // ../../../sources/hackernews/adapter.js was rejected.
+  it('does not report a deep adapter import inside tests/sources/hackernews/**', async () => {
+    const ruleIds = await lint(
+      "import { x } from '../../../sources/hackernews/adapter.js';\nexport const y = x;\n",
+      'tests/sources/hackernews/example.test.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-imports');
+  });
+
+  // A second, distinct platform directory — proves the `files` glob genuinely covers all
+  // three adapter test directories (composer resolution 4 names all three), not just the
+  // one directory a single test case happens to exercise.
+  it('does not report a deep adapter import inside tests/sources/appstore/**', async () => {
+    const ruleIds = await lint(
+      "import { x } from '../../../sources/appstore/adapter.js';\nexport const y = x;\n",
+      'tests/sources/appstore/example.test.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-imports');
+  });
+
+  // Regression guards for the tests/sources/<platform>/** override, mirroring every other
+  // "the exemption is scoped, not a blanket rule-off" test in this file: it must lift
+  // exactly the adapter-import ban and nothing else a plain tests/** file is bound by.
+  it('still reports an @anthropic-ai/sdk import inside tests/sources/hackernews/** — the exemption is deep-adapter-import-only', async () => {
+    const ruleIds = await lint(
+      "import Anthropic from '@anthropic-ai/sdk';\nexport const client = new Anthropic();\n",
+      'tests/sources/hackernews/example.test.ts',
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  it('still reports bare fetch(...) inside tests/sources/hackernews/**', async () => {
+    const messages = await lintMessages(
+      'export async function load(): Promise<Response> {\n  return fetch("https://example.com");\n}\n',
+      'tests/sources/hackernews/example.test.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/net.ts')),
+    ).toBe(true);
+  });
+
+  it('still reports process.env access inside tests/sources/hackernews/**', async () => {
+    const messages = await lintMessages(
+      'export function f(): string | undefined {\n  return process.env.DATABASE_URL;\n}\n',
+      'tests/sources/hackernews/example.test.ts',
+    );
+    expect(
+      messages.some(
+        (m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/config.ts'),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('eslint prohibitions (I-01 criterion 3, fix round 1 Finding 2: the dynamic import() form)', () => {
+  it('reports a dynamic import() of sources/hackernews/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "export async function f() {\n  const m = await import('./hackernews/adapter.js');\n  return m;\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-syntax');
+  });
+
+  it('reports a dynamic import() of sources/appstore/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "export async function f() {\n  const m = await import('./appstore/adapter.js');\n  return m;\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-syntax');
+  });
+
+  it('reports a dynamic import() of sources/reddit/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "export async function f() {\n  const m = await import('./reddit/adapter.js');\n  return m;\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-syntax');
+  });
+
+  // Same boundary condition as the static-import ban's own test: a same-named file that
+  // merely starts with one of the banned words must not false-positive.
+  it('does not false-positive on a dynamic import() of a same-named file', async () => {
+    const ruleIds = await lint(
+      "export async function f() {\n  const m = await import('./hackernews-utils.js');\n  return m;\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+
+  it('does not report a dynamic import() of an adapter inside sources/registry.ts', async () => {
+    const ruleIds = await lint(
+      "export async function f() {\n  const m = await import('./hackernews/adapter.js');\n  return m;\n}\n",
+      'sources/registry.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+
+  it('does not report a dynamic import() of an adapter inside tests/sources/hackernews/**', async () => {
+    const ruleIds = await lint(
+      "export async function f() {\n  const m = await import('../../../sources/hackernews/adapter.js');\n  return m;\n}\n",
+      'tests/sources/hackernews/example.test.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+
+  // Regression guards: dropping ADAPTER_DEEP_IMPORT_EXPRESSION_BAN for sources/registry.ts
+  // required adding a `no-restricted-syntax` entry to that override for the first time (it
+  // previously had none, inheriting the base array wholesale) — restating FETCH_BAN,
+  // CONSTRUCT_BUILTIN_ERROR_BAN, EXTENDS_BUILTIN_ERROR_BAN, and PROCESS_ENV_BAN rather than
+  // silently dropping them is exactly the mistake fix round 1 flagged elsewhere in this
+  // file (F-06 fix round 1, Finding 1) — this proves that restatement actually took.
+  it('still reports bare fetch(...) inside sources/registry.ts', async () => {
+    const messages = await lintMessages(
+      'export async function load(): Promise<Response> {\n  return fetch("https://example.com");\n}\n',
+      'sources/registry.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/net.ts')),
+    ).toBe(true);
+  });
+
+  it('still reports constructing a built-in Error inside sources/registry.ts', async () => {
+    const messages = await lintMessages(
+      "export function f(): void {\n  throw new Error('boom');\n}\n",
+      'sources/registry.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('AppError')),
+    ).toBe(true);
+  });
+
+  it('still reports process.env access inside sources/registry.ts', async () => {
+    const messages = await lintMessages(
+      'export function f(): string | undefined {\n  return process.env.DATABASE_URL;\n}\n',
+      'sources/registry.ts',
+    );
+    expect(
+      messages.some(
+        (m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/config.ts'),
+      ),
+    ).toBe(true);
+  });
+});
+
 // Regression test for R-02: eslint.config.js's `allowDefaultProject` used to be a fixed
 // array that never changed, so it silently drifted out of sync the moment a listed path
 // became a real file — F-04's lib/net.ts and F-05's lib/llm.ts both did this, and
