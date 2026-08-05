@@ -36,8 +36,8 @@ whose `PLAN.md` entry is missing is not done.
 ## Current state
 
 **Phase:** 1 — Ingestion
-**Active tasks:** I-01 (wave 2)
-**Next up:** I-02 ∥ I-03 ∥ I-04 — the three adapters, in parallel
+**Active tasks:** I-02 ∥ I-03 ∥ I-04 (wave 3 — the three adapters, concurrent)
+**Next up:** I-05 ingest orchestrator
 
 **Phase 0 shipped.** PR #1 merged to `main` on 2026-08-05 as `eced880` — six `SPEC.md` tasks
 plus three composer-created reconciliation tasks, 221 tests green.
@@ -91,10 +91,10 @@ a time with `pnpm verify` re-run after each merge.
 |---|---|---|---|---|---|
 | R-04 | Settle `lib/net.ts` terminal-failure contract | DONE | F-04 | — | `944b979` — clears **B-06**; review clean first pass |
 | R-05 | Make TypeScript entry points runnable | DONE | F-01 | — | `7b201a1` (1 fix round) — clears **B-05**; adds `db:migrate`, `db:seed`, `pnpm smoke` |
-| I-01 | `SourceAdapter` interface and registry | WIP | F-04, F-06, R-04 | — | Interface quality determines cost of every future source |
-| I-02 | Hacker News adapter | TODO | I-01 | — | Free and unmetered — develop against this one first |
-| I-03 | App Store reviews adapter | TODO | I-01 | — | |
-| I-04 | Reddit adapter | TODO | I-01 | — | 100 QPM hard limit |
+| I-01 | `SourceAdapter` interface and registry | DONE | F-04, F-06, R-04 | — | `fea7713` (1 fix round) — Interface quality determines cost of every future source |
+| I-02 | Hacker News adapter | WIP | I-01 | — | Free and unmetered — develop against this one first |
+| I-03 | App Store reviews adapter | WIP | I-01 | — | |
+| I-04 | Reddit adapter | WIP | I-01 | — | 100 QPM hard limit |
 | I-05 | Ingest orchestrator | TODO | I-02, I-03, I-04 | — | |
 | I-06 | Scheduling | TODO | I-05 | — | |
 
