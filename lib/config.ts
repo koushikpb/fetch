@@ -42,26 +42,88 @@ const DEFAULT_BUDGET_CEILING_USD = 70;
 const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 const DEFAULT_NODE_ENV: NodeEnv = 'development';
 
+// Fix round 1, Finding 1 (CRITICAL): the previous version assigned the secret fields via
+// `this.foo = fields.foo`, which makes them ordinary own enumerable data properties —
+// `toJSON`/`[inspect.custom]`/`toString` redact `JSON.stringify(config)`,
+// `util.inspect(config)`, and `String(config)` directly, but a caller who instead writes
+// `{...config}`, `Object.entries(config)`, or `structuredClone(config)` bypasses all three
+// hooks and gets the raw secret back, because none of those routes call the instance's own
+// methods — they only ever enumerate own enumerable properties. The concrete regression the
+// reviewer reproduced was `log.info('booted', { ...config })` printing DATABASE_URL and
+// ANTHROPIC_API_KEY straight to stdout.
+//
+// The first fix attempted here used real private fields (`#databaseUrl`) exposed through
+// `get databaseUrl()` accessors. That closes the enumeration hole (private fields are
+// invisible to spread/Object.keys/structuredClone) but turned out to have its own crash:
+// Vitest's `toEqual` compares a class instance by cloning it via `Object.create(prototype)`
+// plus copying property descriptors — a clone that was never run through the real
+// constructor, so the class's private-field slot was never initialized for it. Calling the
+// inherited getter on that clone throws `TypeError: Cannot read private member ... from an
+// object whose class did not declare it` — reproduced directly against Vitest 4.1.10 before
+// settling on the approach below, so any later module (including its own tests) that calls
+// `toEqual`/`toMatchObject` against a `Config` or `RedditConfig` would have hit this.
+//
+// The fix that avoids both problems: `Object.defineProperty` with `enumerable: false` on
+// the instance. This is a genuine, ordinary own data property — reading `config.databaseUrl`
+// is a normal property access, and Vitest's clone-and-compare machinery copies and reads it
+// with no special slot to fail to initialize — but with `enumerable: false` it is invisible
+// to `{...config}`, `Object.keys`/`values`/`entries`, `for...in`, `JSON.stringify` without a
+// `toJSON` override, and `structuredClone`, all of which only ever touch *enumerable* own
+// properties. `writable: false, configurable: false` make it immutable the same way
+// `readonly` does for an ordinary field.
+function defineHiddenValue(target: object, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+}
+
+class RedditConfigValue implements RedditConfig {
+  // `declare` tells TypeScript these properties exist on every instance without emitting a
+  // field initializer that would otherwise stomp on (or conflict with) the
+  // `defineHiddenValue` calls in the constructor, which are the actual runtime source of
+  // truth for these two — see the comment above `defineHiddenValue`.
+  declare readonly clientId: string;
+  declare readonly clientSecret: string;
+  readonly userAgent: string;
+
+  constructor(fields: RedditConfig) {
+    defineHiddenValue(this, 'clientId', fields.clientId);
+    defineHiddenValue(this, 'clientSecret', fields.clientSecret);
+    // Not a secret (SPEC F-03 resolution 3 table) — a UA string identifying the app to
+    // Reddit's API, not a credential — so it stays a plain, own, enumerable field.
+    this.userAgent = fields.userAgent;
+  }
+}
+
 /**
- * The validated, typed settings surface. Deliberately a class rather than a plain object:
- * `toJSON`, `[inspect.custom]`, and `toString` below are what make secret redaction a
- * property of the object itself (composer resolution 5) instead of something every call
- * site has to remember to do. Reading `config.databaseUrl` etc. directly still returns the
- * real value — redaction only guards the serialization routes a careless `console.log`,
- * template literal, or `JSON.stringify` would go through.
+ * The validated, typed settings surface. `databaseUrl`, `anthropicApiKey`, and `reddit` are
+ * non-enumerable own properties (see the comment above `defineHiddenValue`), so the four
+ * secret values are absent from *any* own-property enumeration of a `Config` — not just
+ * from `toJSON`/`inspect`/`toString`, which exist on top of that to give
+ * `JSON.stringify(config)`, `util.inspect(config)`, `console.log(config)`, and
+ * `String(config)`/template coercion an explicit, readable redacted view rather than
+ * silently omitting the keys. Reading `config.databaseUrl` etc. directly still returns the
+ * real value — legitimate consumers (lib/net.ts, lib/llm.ts, the Reddit adapter) need it.
  */
 export class Config implements ConfigFields {
-  readonly databaseUrl: string;
-  readonly anthropicApiKey: string;
-  readonly reddit: RedditConfig | undefined;
+  declare readonly databaseUrl: string;
+  declare readonly anthropicApiKey: string;
+  declare readonly reddit: RedditConfig | undefined;
   readonly budgetCeilingUsd: number;
   readonly logLevel: LogLevel;
   readonly nodeEnv: NodeEnv;
 
   constructor(fields: ConfigFields) {
-    this.databaseUrl = fields.databaseUrl;
-    this.anthropicApiKey = fields.anthropicApiKey;
-    this.reddit = fields.reddit;
+    defineHiddenValue(this, 'databaseUrl', fields.databaseUrl);
+    defineHiddenValue(this, 'anthropicApiKey', fields.anthropicApiKey);
+    defineHiddenValue(
+      this,
+      'reddit',
+      fields.reddit === undefined ? undefined : new RedditConfigValue(fields.reddit),
+    );
     this.budgetCeilingUsd = fields.budgetCeilingUsd;
     this.logLevel = fields.logLevel;
     this.nodeEnv = fields.nodeEnv;

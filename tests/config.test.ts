@@ -9,6 +9,7 @@
 import { inspect } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError } from '../lib/errors.js';
+import { log } from '../lib/log.js';
 import { bootConfig, loadConfig, loadConfigFromEnv } from '../lib/config.js';
 
 // Distinctive enough that a substring match proves something — a generic value like
@@ -44,6 +45,20 @@ function catchError(fn: () => unknown): unknown {
   }
 }
 
+// Shared by both the "secret redaction" describe block and the fix-round-1 "own-property
+// enumeration" block below — a `Config` whose four secret fields all carry the sentinel,
+// plus a real (non-secret) Reddit user agent, so the "still visible" assertions on that
+// field mean something too.
+function configWithSentinel(): ReturnType<typeof loadConfig> {
+  return loadConfig({
+    DATABASE_URL: `postgresql://user:${SECRET_SENTINEL}@localhost:5432/db`,
+    ANTHROPIC_API_KEY: SECRET_SENTINEL,
+    REDDIT_CLIENT_ID: SECRET_SENTINEL,
+    REDDIT_CLIENT_SECRET: SECRET_SENTINEL,
+    REDDIT_USER_AGENT: 'fetch-app/0.1 (by /u/example)',
+  });
+}
+
 function captureStdoutWrites(): { text: () => string; restore: () => void } {
   const chunks: string[] = [];
   const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
@@ -66,11 +81,13 @@ describe('loadConfig — required variables (criterion 1)', () => {
 
   it('accepts a fully populated env, including the optional Reddit trio', () => {
     const config = loadConfig(FULL_VALID_ENV);
-    expect(config.reddit).toEqual({
-      clientId: 'reddit-client-id',
-      clientSecret: 'reddit-client-secret',
-      userAgent: 'fetch-app/0.1 (by /u/example)',
-    });
+    // Asserted field-by-field via direct property access, not `toEqual` against a plain
+    // object literal — `clientId`/`clientSecret` are deliberately non-enumerable (fix
+    // round 1, Finding 1), so `toEqual` silently ignores them rather than comparing them;
+    // reading the property directly is the actual contract being proved here.
+    expect(config.reddit?.clientId).toBe('reddit-client-id');
+    expect(config.reddit?.clientSecret).toBe('reddit-client-secret');
+    expect(config.reddit?.userAgent).toBe('fetch-app/0.1 (by /u/example)');
     expect(config.budgetCeilingUsd).toBe(42.5);
     expect(config.logLevel).toBe('debug');
     expect(config.nodeEnv).toBe('production');
@@ -160,11 +177,11 @@ describe('Reddit trio (all-or-nothing)', () => {
       REDDIT_CLIENT_SECRET: 'secret',
       REDDIT_USER_AGENT: 'ua',
     };
-    expect(loadConfig(env).reddit).toEqual({
-      clientId: 'id',
-      clientSecret: 'secret',
-      userAgent: 'ua',
-    });
+    // Field-by-field, not `toEqual` — see the comment on the equivalent assertion above.
+    const reddit = loadConfig(env).reddit;
+    expect(reddit?.clientId).toBe('id');
+    expect(reddit?.clientSecret).toBe('secret');
+    expect(reddit?.userAgent).toBe('ua');
   });
 });
 
@@ -227,16 +244,6 @@ describe('loadConfigFromEnv — the one process.env read in the repo', () => {
 });
 
 describe('secret redaction (criterion 3) — every route the brief lists', () => {
-  function configWithSentinel(): ReturnType<typeof loadConfig> {
-    return loadConfig({
-      DATABASE_URL: `postgresql://user:${SECRET_SENTINEL}@localhost:5432/db`,
-      ANTHROPIC_API_KEY: SECRET_SENTINEL,
-      REDDIT_CLIENT_ID: SECRET_SENTINEL,
-      REDDIT_CLIENT_SECRET: SECRET_SENTINEL,
-      REDDIT_USER_AGENT: 'fetch-app/0.1 (by /u/example)',
-    });
-  }
-
   it('the sentinel really is present on the raw config fields (sanity check for the tests below)', () => {
     const config = configWithSentinel();
     expect(config.databaseUrl).toContain(SECRET_SENTINEL);
@@ -291,5 +298,64 @@ describe('secret redaction (criterion 3) — every route the brief lists', () =>
     expect(configError.message).not.toContain(SECRET_SENTINEL);
     expect(JSON.stringify(configError.context ?? {})).not.toContain(SECRET_SENTINEL);
     expect(configError.stack ?? '').not.toContain(SECRET_SENTINEL);
+  });
+});
+
+// Fix round 1, Finding 1 (CRITICAL): the reviewer showed that redacting `JSON.stringify`,
+// `util.inspect`, and `toString` is not enough — those three hooks only fire when *called
+// directly* on a `Config` instance. Spreading, enumerating, or structured-cloning the
+// instance instead bypasses all three, because those routes only ever look at own
+// enumerable properties, never at the instance's methods. Each test below exercises one of
+// those bypass routes directly against `configWithSentinel()`; the last one reproduces the
+// concrete regression the reviewer found — `log.info('booted', { ...config })` — end to
+// end through the real `lib/log.ts`, not just through a unit check of the spread result.
+describe('secret redaction survives own-property enumeration, not just the serialization hooks (fix round 1, Finding 1)', () => {
+  it('a shallow spread of config does not carry the sentinel', () => {
+    const config = configWithSentinel();
+    const spread = { ...config };
+    expect(JSON.stringify(spread)).not.toContain(SECRET_SENTINEL);
+  });
+
+  it('a shallow spread of config.reddit on its own does not carry the sentinel', () => {
+    const config = configWithSentinel();
+    const spreadReddit = { ...config.reddit };
+    expect(JSON.stringify(spreadReddit)).not.toContain(SECRET_SENTINEL);
+  });
+
+  it('Object.entries(config) does not carry the sentinel', () => {
+    const config = configWithSentinel();
+    expect(JSON.stringify(Object.entries(config))).not.toContain(SECRET_SENTINEL);
+  });
+
+  it('Object.keys(config) does not even name the secret fields as keys', () => {
+    const config = configWithSentinel();
+    const keys = Object.keys(config);
+    expect(keys).not.toContain('databaseUrl');
+    expect(keys).not.toContain('anthropicApiKey');
+    expect(keys).not.toContain('reddit');
+  });
+
+  it('structuredClone(config) does not carry the sentinel', () => {
+    const config = configWithSentinel();
+    expect(JSON.stringify(structuredClone(config))).not.toContain(SECRET_SENTINEL);
+  });
+
+  it('spreading config still leaves non-secret fields (budgetCeilingUsd, logLevel, nodeEnv) intact', () => {
+    // Proves the fields are genuinely absent from enumeration, not that the whole object
+    // silently became empty — the non-secret plain fields are still own, enumerable
+    // properties and a spread should still carry them.
+    const config = configWithSentinel();
+    const spread = { ...config };
+    expect(spread.budgetCeilingUsd).toBe(config.budgetCeilingUsd);
+    expect(spread.logLevel).toBe(config.logLevel);
+    expect(spread.nodeEnv).toBe(config.nodeEnv);
+  });
+
+  it('the concrete regression: log.info("booted", { ...config }) emits no secret', () => {
+    const config = configWithSentinel();
+    const capture = captureStdoutWrites();
+    log.info('booted', { ...config });
+    capture.restore();
+    expect(capture.text()).not.toContain(SECRET_SENTINEL);
   });
 });

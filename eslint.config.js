@@ -88,9 +88,20 @@ const EXTENDS_BUILTIN_ERROR_BAN = {
 
 // Matches `process.env` itself and any deeper access through it (`process.env.FOO`, since
 // that is a MemberExpression whose `object` is the `process.env` MemberExpression this
-// selector already matches).
+// selector already matches). The dot-notation clause alone missed bracket-notation access
+// to the same property — `process["env"]` is a MemberExpression whose `property` is a
+// `Literal` node, so it has `property.value` ('env'), not `property.name` (that's only set
+// on `Identifier` nodes) — fix round 1, Finding 2 (reviewer verified `process["env"].FOO`
+// and `process["env"]["FOO"]` produced zero lint messages against the dot-only selector).
+// The second clause below closes that gap the same way the dot clause covers
+// `process.env.FOO`: matching the inner `process["env"]` sub-expression, regardless of how
+// it's chained afterward.
 const PROCESS_ENV_BAN = {
-  selector: "MemberExpression[object.name='process'][property.name='env']",
+  selector:
+    ':matches(' +
+    "MemberExpression[object.name='process'][property.name='env'], " +
+    "MemberExpression[object.name='process'][computed=true][property.value='env']" +
+    ')',
   message: `Reading process.env directly is forbidden outside ${CONFIG_MODULE} — call loadConfigFromEnv() or bootConfig() instead (SPEC F-03 criterion 2).`,
 };
 
