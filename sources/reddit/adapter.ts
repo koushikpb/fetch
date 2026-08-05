@@ -285,11 +285,18 @@ async function fetchListingPage(
   };
 }
 
+interface CommentThreadResult {
+  readonly documents: Document[];
+  readonly headroom: RedditRateLimitHeadroom | undefined;
+  readonly skipped: number;
+  readonly candidates: number;
+}
+
 async function fetchCommentDocuments(
   post: MappedPost,
   subreddit: string,
   deps: FetchDeps,
-): Promise<{ documents: Document[]; headroom: RedditRateLimitHeadroom | undefined }> {
+): Promise<CommentThreadResult> {
   const { maxDepth, maxBreadth } = deps.commentExpansion;
   const params = new URLSearchParams({
     limit: String(maxBreadth),
@@ -309,7 +316,7 @@ async function fetchCommentDocuments(
     // The thread became unavailable between the listing call and this one (deleted post,
     // newly banned subreddit) — the post Document itself is still valid evidence; there is
     // simply nothing to expand, and re-fetching would not change that.
-    return { documents: [], headroom };
+    return { documents: [], headroom, skipped: 0, candidates: 0 };
   }
   if (!response.ok) {
     throw new UpstreamError(`Reddit comments fetch for post ${post.postId36} returned ${response.status}`, {
@@ -318,14 +325,18 @@ async function fetchCommentDocuments(
   }
   const json: unknown = await response.json();
   const children = parseCommentsResponse(json, post.postId36);
-  const documents = walkCommentTree(children, post.permalink, maxDepth, maxBreadth);
-  return { documents, headroom };
+  const walked = walkCommentTree(children, post.permalink, maxDepth, maxBreadth);
+  return { documents: walked.documents, headroom, skipped: walked.skipped, candidates: walked.candidates };
 }
 
 interface ExpansionResult {
   readonly documents: Document[];
   readonly headroom: RedditRateLimitHeadroom | undefined;
   readonly error: AppError | undefined;
+  /** Unmappable `t1` children summed across every thread expanded for this page, against the
+   *  children the walk attempted — see `WalkedComments` in ./mapping.ts. */
+  readonly skipped: number;
+  readonly candidates: number;
 }
 
 /**
@@ -342,6 +353,8 @@ async function expandQualifyingThreads(
   const documents: Document[] = [];
   let headroom: RedditRateLimitHeadroom | undefined;
   let firstError: AppError | undefined;
+  let skipped = 0;
+  let candidates = 0;
   for (const post of posts) {
     if (post.numComments < deps.commentExpansion.minCommentsToExpand) {
       continue;
@@ -350,6 +363,19 @@ async function expandQualifyingThreads(
       const result = await fetchCommentDocuments(post, subreddit, deps);
       documents.push(...result.documents);
       headroom = result.headroom ?? headroom;
+      skipped += result.skipped;
+      candidates += result.candidates;
+      if (result.skipped > 0) {
+        // Named per thread rather than only in the page-level total, so the log points at
+        // the payload to go look at.
+        log.warn('Reddit comment children could not be mapped to Documents', {
+          source: 'reddit',
+          subreddit,
+          post_id: post.postId36,
+          skipped: result.skipped,
+          total: result.candidates,
+        });
+      }
     } catch (err) {
       if (!(err instanceof AppError)) {
         throw err;
@@ -361,12 +387,26 @@ async function expandQualifyingThreads(
         error: err,
       });
       if (err instanceof RateLimitError) {
-        return { documents, headroom, error: err };
+        return { documents, headroom, error: err, skipped, candidates };
       }
       firstError ??= err;
     }
   }
-  return { documents, headroom, error: firstError };
+  return { documents, headroom, error: firstError, skipped, candidates };
+}
+
+/**
+ * The comment-side counterpart of the listing shortfall: a renamed `t1` field drops every
+ * comment on the page, and comments are most of Reddit's document volume, so without this a
+ * page can carry only its posts and still look entirely ordinary. Same ratio as the listing
+ * path, because the question is the same one — did most of what arrived turn out to be
+ * unreadable?
+ */
+function commentShortfallReason(expansion: ExpansionResult, subreddit: string): string | undefined {
+  if (expansion.candidates === 0 || expansion.skipped / expansion.candidates < MAPPING_SHORTFALL_TRUNCATION_RATIO) {
+    return undefined;
+  }
+  return `${expansion.skipped} of ${expansion.candidates} comments expanded in r/${subreddit} did not carry the fields this adapter maps — Reddit's per-item response shape may have changed`;
 }
 
 interface PageParts {
@@ -483,8 +523,16 @@ export function createRedditAdapter(options: RedditAdapterOptions = {}): SourceA
     // Never advance past a page whose comments were not all fetched. Re-fetching a listing
     // page is cheap and deduplicates on `(source, source_id)`; the comments skipped by
     // advancing are gone, because nothing ever revisits a page the cursor has passed
-    // (CLAUDE.md rule 1). The caller bounds how many pages one run fetches, so a thread
-    // failing indefinitely stalls this sweep rather than looping forever inside this call.
+    // (CLAUDE.md rule 1).
+    //
+    // Known cost, parked pending B-09: this cursor is a single position in one global
+    // (subreddit × listing) round-robin, so holding it still stops **the entire Reddit
+    // source**, not just the pair being swept — every other configured subreddit, and this
+    // one's `top` listing, go unreached until the failing thread recovers. A loud stall
+    // still beats silent evidence loss, so the reproducing cursor stays; the real fix is
+    // per-subreddit cursor state, which waits for real credentials and real payloads to
+    // validate against. A caller detects the stall as `cursor_out === cursor_in` together
+    // with `outcome.kind === 'partial'`, and must bound pages per run so it does not spin.
     const nextCursor =
       expansion.error !== undefined
         ? encodeIncrementalCursor(pair, position.after)
@@ -497,7 +545,9 @@ export function createRedditAdapter(options: RedditAdapterOptions = {}): SourceA
       cursor: nextCursor,
       headroom: expansion.headroom ?? listingResult.headroom,
       error: expansion.error,
-      truncatedReason: listingResult.truncatedReason,
+      // A broken listing shape outranks a broken comment shape: it is the more fundamental
+      // signal, and the comment shortfall usually follows from it rather than standing alone.
+      truncatedReason: listingResult.truncatedReason ?? commentShortfallReason(expansion, pair.subreddit),
     });
   }
 
@@ -552,7 +602,7 @@ export function createRedditAdapter(options: RedditAdapterOptions = {}): SourceA
       cursor: nextCursor,
       headroom: expansion.headroom ?? listingResult.headroom,
       error: expansion.error,
-      truncatedReason: listingResult.truncatedReason,
+      truncatedReason: listingResult.truncatedReason ?? commentShortfallReason(expansion, subreddit),
     });
   }
 

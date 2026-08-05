@@ -94,6 +94,14 @@ function commentsWith(postName: string, commentIds: readonly string[]): unknown 
   ];
 }
 
+function findLogRecord(capturedStdout: string, msg: string): Record<string, unknown> | undefined {
+  return capturedStdout
+    .split('\n')
+    .filter((line) => line.startsWith('{') && line.endsWith('}'))
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((record) => record.msg === msg);
+}
+
 function dataUrls(server: { calls: () => readonly { url: string }[] }): string[] {
   return server.calls().map((call) => call.url).filter((url) => url !== TOKEN_URL);
 }
@@ -526,12 +534,57 @@ describe('a page nothing could be mapped from is not reported as a clean empty s
     const lines = capture.lines().join('\n');
     capture.restore();
 
-    const warning = lines
-      .split('\n')
-      .filter((line) => line.startsWith('{') && line.endsWith('}'))
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
-      .find((record) => record.msg === 'Reddit listing items could not be mapped to Documents');
+    const warning = findLogRecord(lines, 'Reddit listing items could not be mapped to Documents');
     expect(warning).toMatchObject({ level: 'warn', source: 'reddit', subreddit: 'shapechange', skipped: 3, total: 3 });
+  });
+});
+
+describe('a comments response nothing could be mapped from is not reported as a clean success', () => {
+  const route: Router = (url) => {
+    if (url.pathname === '/r/commentshape/new') {
+      return { body: listingWith('commentshape', [{ id: 'kkk111', numComments: 9 }], null) };
+    }
+    if (url.pathname === '/r/commentshape/comments/kkk111') {
+      return { body: loadFixture('synthetic-comments-unmappable-children.json') };
+    }
+    return undefined;
+  };
+
+  function buildAdapter() {
+    const server = createFakeRedditServer({ tokenUrl: TOKEN_URL, route });
+    return createRedditAdapter({ ...AUTH, subreddits: ['commentshape'], netClient: fastNetClient(server.transport) });
+  }
+
+  it('reports truncated when the post maps but every comment under it does not', async () => {
+    const page = (await buildAdapter().fetchIncremental(undefined)) as RedditFetchPage;
+
+    // The post alone would otherwise look like an ordinary page: the listing parsed, the
+    // comments request succeeded, and only the ~6-to-1 bulk of the page silently vanished.
+    expect(page.documents.map((d) => d.sourceId)).toEqual(['t3_kkk111']);
+    expect(page.outcome?.kind).toBe('truncated');
+    if (page.outcome?.kind === 'truncated') {
+      expect(page.outcome.reason).toContain('3 of 3');
+      expect(page.outcome.reason).toContain('r/commentshape');
+    }
+  });
+
+  it('logs the skipped and total counts against the post whose thread they came from', async () => {
+    const adapter = buildAdapter();
+
+    const capture = captureStdoutWrites();
+    await adapter.fetchIncremental(undefined);
+    const lines = capture.lines().join('\n');
+    capture.restore();
+
+    const warning = findLogRecord(lines, 'Reddit comment children could not be mapped to Documents');
+    expect(warning).toMatchObject({
+      level: 'warn',
+      source: 'reddit',
+      subreddit: 'commentshape',
+      post_id: 'kkk111',
+      skipped: 3,
+      total: 3,
+    });
   });
 });
 

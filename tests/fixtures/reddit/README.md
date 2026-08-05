@@ -48,14 +48,18 @@ The field names, nesting, and value types below were written from Reddit's docum
 - `synthetic-comments-*.json` — the two-element `[postListing, commentsListing]` array the
   `/comments/<id>` endpoint returns, with nested `replies` sub-`Listing`s and one
   `{kind: "more"}` stub.
-- `synthetic-listing-new-page1.json`'s first post carries a wide (~60-field) `t3` node, so
-  the mapper is at least exercised against a node far larger than the fields it reads, and
+- `synthetic-listing-new-page1.json`'s first post carries a wide `t3` node — **104 keys** —
+  so the mapper is at least exercised against a node far larger than the fields it reads, and
   `Document.raw` is proven to keep the untouched node. The remaining fixtures are deliberately
   narrow — they exist for one edge case each and a full node would only obscure it.
 - `synthetic-listing-unmappable-children.json` is a listing whose per-item field names have
   all been renamed (`id` → `identifier`, `created_utc` → `created_at_utc`, …). It is the
   regression fixture for "Reddit renamed a per-item field": every child fails to map, and the
   page must not read as a clean empty success.
+- `synthetic-comments-unmappable-children.json` is the same case one level down — three
+  structurally valid `t1` children whose `body`/`created_utc` have been renamed, plus a
+  `more` stub that must *not* be counted as a failure. Comment documents are most of Reddit's
+  volume, so this is the path where a silent zero-document page hides best.
 
 ## Identity values
 

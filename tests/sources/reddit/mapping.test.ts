@@ -153,7 +153,7 @@ describe('toCommentDocument', () => {
 describe('walkCommentTree — bounded depth and breadth (composer resolution 5)', () => {
   it('takes at most maxBreadth top-level comments, skips "more" stubs, and stops recursing past maxDepth', () => {
     const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
-    const documents = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 2, 5);
+    const { documents } = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 2, 5);
 
     const sourceIds = documents.map((d) => d.sourceId);
     // Breadth: exactly 5 top-level comments taken (cm1, c2..c5); c6/c7/the "more" stub excluded.
@@ -177,7 +177,7 @@ describe('walkCommentTree — bounded depth and breadth (composer resolution 5)'
     const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
 
     // maxDepth 1 is top-level only — not "top-level plus one nested level".
-    const oneLevel = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 1, 5).map((d) => d.sourceId);
+    const oneLevel = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 1, 5).documents.map((d) => d.sourceId);
     expect(oneLevel).toEqual(['t1_cm1', 't1_c2', 't1_c3', 't1_c4', 't1_c5']);
     expect(oneLevel).not.toContain('t1_cm1a');
   });
@@ -204,7 +204,7 @@ describe('walkCommentTree — bounded depth and breadth (composer resolution 5)'
       wide('p3', []),
     ];
 
-    const sourceIds = walkCommentTree(children, '/r/testsub/x/', 2, 2).map((d) => d.sourceId);
+    const sourceIds = walkCommentTree(children, '/r/testsub/x/', 2, 2).documents.map((d) => d.sourceId);
 
     // Breadth 2 caps each group independently: 2 top-level comments, and 2 replies under
     // *each* of them — 6 documents from a breadth of 2, not 2 or 4.
@@ -213,7 +213,44 @@ describe('walkCommentTree — bounded depth and breadth (composer resolution 5)'
 
   it('returns nothing at depth >= maxDepth without making any further request', () => {
     const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
-    expect(walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 0, 5)).toEqual([]);
+    expect(walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 0, 5).documents).toEqual([]);
+  });
+});
+
+describe('walkCommentTree — separating deliberate skips from unreadable children', () => {
+  it('counts no skips for a thread it read fully, despite the "more" stub and the comments past maxBreadth', () => {
+    const [, commentsListing] = loadFixture('synthetic-comments-aaa111.json') as [unknown, { data: { children: unknown[] } }];
+
+    const walked = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 2, 5);
+
+    // 5 top-level comments plus cm1's one reply were attempted and all mapped. c6, c7 and
+    // the `more` stub are deliberate exclusions, not failures, so they are in neither number.
+    expect(walked).toMatchObject({ skipped: 0, candidates: 6 });
+    expect(walked.documents).toHaveLength(6);
+  });
+
+  it('counts a structurally valid t1 whose fields it cannot read as a skip', () => {
+    const [, commentsListing] = loadFixture('synthetic-comments-unmappable-children.json') as [
+      unknown,
+      { data: { children: unknown[] } },
+    ];
+
+    const walked = walkCommentTree(commentsListing.data.children, '/r/testsub/x/', 2, 5);
+
+    expect(walked.documents).toEqual([]);
+    // Three renamed `t1` children counted; the `more` stub alongside them is not.
+    expect(walked).toMatchObject({ skipped: 3, candidates: 3 });
+  });
+
+  it('does not count a non-t1 kind or a child with no data record as a skip', () => {
+    const walked = walkCommentTree(
+      [{ kind: 'more', data: { count: 3 } }, { kind: 't1' }, { kind: 't3', data: { id: 'x' } }, 'not an object'],
+      '/r/testsub/x/',
+      2,
+      5,
+    );
+
+    expect(walked).toEqual({ documents: [], skipped: 0, candidates: 0 });
   });
 });
 

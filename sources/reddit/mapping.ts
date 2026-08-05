@@ -151,6 +151,22 @@ export function toCommentDocument(commentData: Record<string, unknown>, postPerm
   return { document, repliesNode: replies };
 }
 
+export interface WalkedComments {
+  readonly documents: Document[];
+  /**
+   * `t1` children carrying a `data` record that `toCommentDocument` rejected. Every skip
+   * this walk makes *on purpose* is excluded — a non-`t1` node, a `more` stub, a child with
+   * no `data` record, anything past the breadth or depth bound — so a non-zero count here
+   * means only one thing: comments arrived that this adapter could not read. Comment
+   * documents are the bulk of Reddit's volume (~6 per qualifying post against 1 post
+   * document), and without this the whole lot can vanish behind an ordinary-looking page.
+   */
+  readonly skipped: number;
+  /** `t1` children with a `data` record that this walk actually attempted to map — the
+   *  denominator `skipped` is meaningful against. */
+  readonly candidates: number;
+}
+
 /**
  * Bounded, request-free walk of a comments-thread response already in hand — the depth/
  * breadth ceiling (composer resolution 5) is enforced here in memory, in addition to being
@@ -166,12 +182,14 @@ export function walkCommentTree(
   maxDepth: number,
   maxBreadth: number,
   depth = 0,
-): Document[] {
+): WalkedComments {
   if (depth >= maxDepth) {
-    return [];
+    return { documents: [], skipped: 0, candidates: 0 };
   }
   const documents: Document[] = [];
   let taken = 0;
+  let skipped = 0;
+  let candidates = 0;
   for (const child of children) {
     if (taken >= maxBreadth) {
       break;
@@ -184,8 +202,10 @@ export function walkCommentTree(
     if (data === undefined) {
       continue;
     }
+    candidates += 1;
     const mapped = toCommentDocument(data, postPermalink);
     if (mapped === undefined) {
+      skipped += 1;
       continue;
     }
     documents.push(mapped.document);
@@ -194,10 +214,13 @@ export function walkCommentTree(
     const repliesData = repliesRecord === undefined ? undefined : asRecord(repliesRecord.data);
     const repliesChildren = repliesData?.children;
     if (Array.isArray(repliesChildren)) {
-      documents.push(...walkCommentTree(repliesChildren, postPermalink, maxDepth, maxBreadth, depth + 1));
+      const replies = walkCommentTree(repliesChildren, postPermalink, maxDepth, maxBreadth, depth + 1);
+      documents.push(...replies.documents);
+      skipped += replies.skipped;
+      candidates += replies.candidates;
     }
   }
-  return documents;
+  return { documents, skipped, candidates };
 }
 
 /** Only the second element of Reddit's `[postListing, commentsListing]` pair is read: the
