@@ -1,0 +1,79 @@
+[
+  {
+    "source": "hackernews",
+    "source_id": "hn-1001",
+    "url": "https://news.ycombinator.com/item?id=1001",
+    "author_handle": "dbgrump",
+    "title": "Ask HN: Why is there no good way to track recurring subscriptions across banks?",
+    "body": "Every subscription tracker I've tried assumes one bank account. I have three, plus a couple of cards, and none of the tools reconcile across all of them. I end up keeping a spreadsheet, which defeats the point.",
+    "created_at": "2025-01-08T14:32:00.000Z",
+    "engagement": { "points": 142, "comments": 87 },
+    "raw": { "id": 1001, "type": "story", "score": 142, "descendants": 87 }
+  },
+  {
+    "source": "hackernews",
+    "source_id": "hn-1002",
+    "url": "https://news.ycombinator.com/item?id=1002",
+    "author_handle": "queuewatcher",
+    "title": null,
+    "body": "Same problem here. I ended up writing a 200-line script that scrapes CSV exports from each bank's portal because nothing on the market handles more than one institution cleanly.",
+    "created_at": "2025-01-08T16:05:00.000Z",
+    "engagement": { "points": 0, "comments": 0 },
+    "raw": { "id": 1002, "type": "comment", "parent": 1001 }
+  },
+  {
+    "source": "hackernews",
+    "source_id": "hn-1003",
+    "url": "https://news.ycombinator.com/item?id=1003",
+    "author_handle": "smallteamops",
+    "title": "Show HN: I built a tiny tool to diff Postgres schemas across environments",
+    "body": "Got tired of manually comparing staging and prod schemas before a migration. This just dumps information_schema and diffs it. Would love feedback.",
+    "created_at": "2025-02-02T09:12:00.000Z",
+    "engagement": { "points": 58, "comments": 21 },
+    "raw": { "id": 1003, "type": "story", "score": 58, "descendants": 21 }
+  },
+  {
+    "source": "hackernews",
+    "source_id": "hn-1004",
+    "url": "https://news.ycombinator.com/item?id=1004",
+    "author_handle": "onCallForever",
+    "title": "Ask HN: How do you handle on-call for a two-person infra team?",
+    "body": "Every on-call rotation tool assumes at least five engineers. With two of us, we just take turns manually and there's no good way to track handoffs or escalations without paying for enterprise pricing tiers we don't need.",
+    "created_at": "2025-02-14T11:47:00.000Z",
+    "engagement": { "points": 96, "comments": 54 },
+    "raw": { "id": 1004, "type": "story", "score": 96, "descendants": 54 }
+  },
+  {
+    "source": "hackernews",
+    "source_id": "hn-1005",
+    "url": "https://news.ycombinator.com/item?id=1005",
+    "author_handle": "receiptless",
+    "title": null,
+    "body": "I've given up on expense tools entirely. None of them handle receipts that arrive as forwarded emails with the actual PDF three attachments deep. I just keep a folder now.",
+    "created_at": "2025-03-01T18:20:00.000Z",
+    "engagement": { "points": 0, "comments": 0 },
+    "raw": { "id": 1005, "type": "comment", "parent": 998 }
+  },
+  {
+    "source": "hackernews",
+    "source_id": "hn-1006",
+    "url": "https://news.ycombinator.com/item?id=1006",
+    "author_handle": "latticeworker",
+    "title": "Why do all changelog generators assume a single monorepo?",
+    "body": "We ship across four repos with independent release cadences and every changelog generator I've evaluated wants one repo, one version number. Stitching a coherent release note together is still manual.",
+    "created_at": "2025-03-19T08:03:00.000Z",
+    "engagement": { "points": 71, "comments": 33 },
+    "raw": { "id": 1006, "type": "story", "score": 71, "descendants": 33 }
+  },
+  {
+    "source": "hackernews",
+    "source_id": "hn-1007",
+    "url": "https://news.ycombinator.com/item?id=1007",
+    "author_handle": "graphgrump",
+    "title": null,
+    "body": "This matches my experience maintaining internal docs. Search is fine until you have more than one wiki, then relevance collapses and nobody trusts it enough to keep it updated.",
+    "created_at": "2025-04-05T20:41:00.000Z",
+    "engagement": { "points": 0, "comments": 0 },
+    "raw": { "id": 1007, "type": "comment", "parent": 1006 }
+  }
+]
