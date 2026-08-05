@@ -135,7 +135,28 @@ async function registerWorkers(
           continue;
         }
         const queue = ingestQueueName(source);
-        const jobId = await boss.send(queue, { source } satisfies IngestJobData);
+        let jobId: string | null;
+        try {
+          jobId = await boss.send(queue, { source } satisfies IngestJobData);
+        } catch (err) {
+          // The other half of the blindness this queue exists to remove. A refused forward
+          // returns `null` and is handled below; a *throwing* one — the database unreachable
+          // for the moment the tick lands — would otherwise leave the failure only in
+          // `pgboss.job.output` on a tick queue that has `retryLimit: 0` and no dead letter,
+          // i.e. no line at any level and nothing to find later.
+          log.error('scheduled ingest tick could not be dispatched', {
+            source,
+            queue,
+            tick_job_id: job.id,
+            error: err,
+            effect:
+              'this cadence interval is skipped; the next tick dispatches normally and resumes from the same cursor',
+          });
+          // Rethrown so the tick job records the failure too, rather than completing as if it
+          // had dispatched something. Safe with `batchSize: 1` — there is no sibling job in
+          // this batch whose successful dispatch would be misreported as failed.
+          throw err;
+        }
         if (jobId === null) {
           log.warn('scheduled ingest tick dropped: a run of this source is already pending', {
             source,

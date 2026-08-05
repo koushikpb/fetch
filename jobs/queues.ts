@@ -154,11 +154,17 @@ export async function provisionIngestQueues(
  */
 async function assertQueuePolicy(boss: PgBoss, name: string): Promise<void> {
   const queue = await boss.getQueue(name);
-  if (queue !== null && queue.policy !== INGEST_QUEUE_POLICY) {
+  // A `null` here is drift too, not an exemption. It means the queue that was just created
+  // cannot be read back, so the policy is unknown — and "unknown" is exactly the answer this
+  // check exists to refuse, since the whole point is that an unverified lock is worse than a
+  // failed boot. Skipping the assertion on `null` would make the one unreadable case the one
+  // case that passes.
+  if (queue === null || queue.policy !== INGEST_QUEUE_POLICY) {
+    const actual = queue === null ? 'unknown (queue could not be read back)' : String(queue.policy);
     throw new AppError(
       'INGEST_QUEUE_POLICY_DRIFT',
-      `Queue "${name}" has policy "${String(queue.policy)}" but the per-source lock requires "${INGEST_QUEUE_POLICY}". Policy cannot be changed after creation — delete the queue and let the next boot recreate it.`,
-      { context: { queue: name, actual: queue.policy, expected: INGEST_QUEUE_POLICY } },
+      `Queue "${name}" has policy "${actual}" but the per-source lock requires "${INGEST_QUEUE_POLICY}". Policy cannot be changed after creation — delete the queue and let the next boot recreate it.`,
+      { context: { queue: name, actual, expected: INGEST_QUEUE_POLICY } },
     );
   }
 }
@@ -182,12 +188,19 @@ async function assertQueuePolicy(boss: PgBoss, name: string): Promise<void> {
  * cadence and the rest silently on the old one, with nothing recording the split. The
  * previous state is captured first and restored on any failure, so a rejected expression
  * leaves the schedule exactly as it was and the worker refuses to boot.
+ *
+ * The snapshot covers the legacy per-source schedules as well as the tick queue's. It did not
+ * at first, which made the all-or-nothing claim false on precisely the boot where it matters
+ * most: upgrading a deployment that still had round-0 schedules, with one bad cron, destroyed
+ * all three of them and "restored" nothing. The worker refuses to boot either way, so a lone
+ * deployment self-heals on the corrected restart — but a second, still-running old worker
+ * would have gone silent, which is the scenario the rollback exists for.
  */
 export async function applyIngestSchedules(
   boss: PgBoss,
   scheduler: SchedulerConfig,
 ): Promise<void> {
-  const previous = await boss.getSchedules(INGEST_TICK_QUEUE);
+  const previous = await snapshotSchedules(boss);
   try {
     for (const source of SOURCES) {
       // Schedules written by an earlier build pointed straight at the source queue. Left
@@ -209,26 +222,60 @@ export async function applyIngestSchedules(
       log.info('ingest schedule registered', { source, cron, tz: scheduler.timezone });
     }
   } catch (err) {
-    await restoreSchedules(boss, previous);
+    try {
+      await restoreSchedules(boss, previous);
+    } catch (restoreErr) {
+      // A failing rollback must not become the only thing the operator hears about. Bare
+      // propagation of `restoreErr` replaced "your cron says 61" with "the restore failed",
+      // which is the one detail that cannot be recovered from anywhere else — the rejected
+      // expression is in a file only they can see. Both messages are in the text because
+      // scripts/worker.ts prints an AppError's own message without walking `cause`; `cause`
+      // still carries the original for anything reading it programmatically.
+      throw new AppError(
+        'INGEST_SCHEDULE_ROLLBACK_FAILED',
+        `Applying ingest schedules failed and rolling them back failed too, so the stored schedule may be half-applied. Original failure: ${describe(err)}. Rollback failure: ${describe(restoreErr)}`,
+        { cause: err, context: { rollbackError: describe(restoreErr) } },
+      );
+    }
     throw err;
   }
 }
 
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Everything this function is about to change: the tick queue's schedules and any legacy
+ * per-source ones. Both are captured because both are unscheduled below.
+ */
+async function snapshotSchedules(boss: PgBoss): Promise<readonly Schedule[]> {
+  const snapshot: Schedule[] = [...(await boss.getSchedules(INGEST_TICK_QUEUE))];
+  for (const source of SOURCES) {
+    snapshot.push(...(await boss.getSchedules(ingestQueueName(source))));
+  }
+  return snapshot;
+}
+
 async function restoreSchedules(boss: PgBoss, previous: readonly Schedule[]): Promise<void> {
-  const keep = new Set(previous.map((entry) => entry.key));
+  const keep = new Set(
+    previous.filter((entry) => entry.name === INGEST_TICK_QUEUE).map((entry) => entry.key),
+  );
   for (const source of SOURCES) {
     if (!keep.has(source)) {
       await boss.unschedule(INGEST_TICK_QUEUE, source);
     }
   }
+  // Restored under each entry's own queue name, which is what puts a legacy per-source
+  // schedule back where it was rather than silently migrating it to the tick queue.
   for (const entry of previous) {
-    await boss.schedule(INGEST_TICK_QUEUE, entry.cron, entry.data ?? null, {
+    await boss.schedule(entry.name, entry.cron, entry.data ?? null, {
       ...entry.options,
       tz: entry.timezone,
       key: entry.key,
     });
   }
   log.warn('ingest schedules rolled back after a rejected expression', {
-    restored: previous.map((entry) => ({ key: entry.key, cron: entry.cron })),
+    restored: previous.map((entry) => ({ queue: entry.name, key: entry.key, cron: entry.cron })),
   });
 }

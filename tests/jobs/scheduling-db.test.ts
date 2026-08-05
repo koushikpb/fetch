@@ -28,7 +28,7 @@ import {
 } from '../../jobs/index.js';
 import { loadConfig, type Config } from '../../lib/config.js';
 import type { Source } from '../../lib/types.js';
-import { RateLimitError } from '../../lib/errors.js';
+import { AppError, RateLimitError } from '../../lib/errors.js';
 import { createRegistry, createSourceRegistry } from '../../sources/registry.js';
 import {
   setupScratchDatabase,
@@ -808,5 +808,160 @@ describe('a tick that arrives while the source is already busy', () => {
     expect(dropped?.source).toBe('hackernews');
     // Dropped, not queued: the second tick never became a second run.
     expect(started).toBe(1);
+  }, 60_000);
+});
+
+describe('error paths that would otherwise be silent', () => {
+  let scratch: ScratchDatabase;
+  let boss: PgBoss;
+
+  beforeAll(async () => {
+    scratch = await setupScratchDatabase('jobs_silent');
+    boss = new PgBoss({ connectionString: scratch.connectionString, schedule: false });
+    await boss.start();
+    await provisionIngestQueues(boss, configFor(scratch.connectionString).scheduler);
+  }, 60_000);
+
+  afterAll(async () => {
+    vi.restoreAllMocks();
+    await stopBoss(boss);
+    await teardownScratchDatabase(scratch);
+  });
+
+  it('logs at error when a tick cannot be dispatched at all', async () => {
+    // The refused forward returns `null` and is covered elsewhere. This is the throwing one:
+    // with `retryLimit: 0` and no dead letter on the tick queue, the failure would otherwise
+    // exist only in `pgboss.job.output` — no line at any level, nothing to alert on.
+    const worker = await startIngestWorker({
+      config: configFor(scratch.connectionString),
+      context: {
+        registry: createSourceRegistry([createFakeAdapter({ source: 'hackernews' })]),
+        documents: createMemoryDocumentSink(),
+        cursors: createMemoryCursorStore(),
+        runs: createMemoryRunRecorder(),
+      },
+      pollingIntervalSeconds: 0.5,
+    });
+    const capture = captureLog();
+    try {
+      // Selective: the forward the dispatcher makes onto the source queue fails, while this
+      // test's own enqueue onto the tick queue still has to work.
+      const realSend = worker.boss.send.bind(worker.boss);
+      vi.spyOn(worker.boss, 'send').mockImplementation(
+        async (...args: Parameters<typeof realSend>) => {
+          if (args[0] === ingestQueueName('hackernews')) {
+            throw new Error('SIMULATED send failure');
+          }
+          return realSend(...args);
+        },
+      );
+
+      await worker.boss.send(INGEST_TICK_QUEUE, { source: 'hackernews' });
+
+      await waitFor('the failed dispatch to be logged', () =>
+        parseLogLines(capture.lines()).some(
+          (record) => record.msg === 'scheduled ingest tick could not be dispatched',
+        ),
+      );
+      const failure = parseLogLines(capture.lines()).find(
+        (record) => record.msg === 'scheduled ingest tick could not be dispatched',
+      );
+      expect(failure?.level).toBe('error');
+      expect(failure?.source).toBe('hackernews');
+      expect(JSON.stringify(failure?.error)).toContain('SIMULATED send failure');
+    } finally {
+      capture.restore();
+      vi.restoreAllMocks();
+      await stopBoss(worker.boss);
+    }
+  }, 60_000);
+
+  it('keeps the original failure when the rollback itself fails', async () => {
+    // Bare propagation of the rollback error replaced "your cron says 61" with "the restore
+    // failed" — and the rejected expression lives in a file only the operator can see, so it
+    // is the one detail unrecoverable from anywhere else.
+    await applyIngestSchedules(
+      boss,
+      configFor(scratch.connectionString, {
+        INGEST_SCHEDULE_HACKERNEWS: '*/11 * * * *',
+        INGEST_SCHEDULE_APPSTORE: '19 * * * *',
+        INGEST_SCHEDULE_REDDIT: '39 * * * *',
+      }).scheduler,
+    );
+
+    // The apply loop schedules hackernews, appstore, then throws on reddit's `61`. Everything
+    // after that third call belongs to the rollback, so failing from the fourth call onward
+    // simulates a restore that cannot complete.
+    const real = boss.schedule.bind(boss);
+    let calls = 0;
+    vi.spyOn(boss, 'schedule').mockImplementation(async (...args: Parameters<typeof real>) => {
+      calls += 1;
+      if (calls >= 4) {
+        throw new Error('SIMULATED restore failure');
+      }
+      return real(...args);
+    });
+
+    const error: unknown = await applyIngestSchedules(
+      boss,
+      configFor(scratch.connectionString, {
+        INGEST_SCHEDULE_HACKERNEWS: '*/2 * * * *',
+        INGEST_SCHEDULE_APPSTORE: '19 * * * *',
+        INGEST_SCHEDULE_REDDIT: '61 * * * *',
+      }).scheduler,
+    ).catch((e: unknown) => e);
+    vi.restoreAllMocks();
+
+    expect(error).toBeInstanceOf(AppError);
+    const appError = error as AppError;
+    expect(appError.code).toBe('INGEST_SCHEDULE_ROLLBACK_FAILED');
+    // Both, in the message itself: scripts/worker.ts prints an AppError's own message without
+    // walking `cause`, so an original reachable only via `cause` would never be seen.
+    expect(appError.message).toContain('61');
+    expect(appError.message).toContain('SIMULATED restore failure');
+    // And still attached for anything reading it programmatically.
+    expect((appError.cause as Error).message).toContain('61');
+  }, 60_000);
+
+  it('rolls back legacy per-source schedules too, not just the tick queue', async () => {
+    // The upgrade path. A round-0 deployment has schedules on the source queues; this
+    // function unschedules them, so leaving them out of the snapshot meant a single bad cron
+    // on the upgrade boot destroyed every schedule and "restored" an empty set.
+    for (const source of ['hackernews', 'appstore', 'reddit'] as const) {
+      await boss.schedule(ingestQueueName(source), '*/7 * * * *', null, { tz: 'UTC' });
+    }
+    await boss.unschedule(INGEST_TICK_QUEUE, 'hackernews');
+    await boss.unschedule(INGEST_TICK_QUEUE, 'appstore');
+    await boss.unschedule(INGEST_TICK_QUEUE, 'reddit');
+
+    await expect(
+      applyIngestSchedules(
+        boss,
+        configFor(scratch.connectionString, { INGEST_SCHEDULE_REDDIT: '61 * * * *' }).scheduler,
+      ),
+    ).rejects.toThrow();
+
+    // The legacy deployment's schedules survive: a co-running old worker keeps ticking.
+    for (const source of ['hackernews', 'appstore', 'reddit'] as const) {
+      const legacy = await boss.getSchedules(ingestQueueName(source));
+      expect(legacy).toMatchObject([{ cron: '*/7 * * * *' }]);
+    }
+    // Cleaned up so the next test starts from a known state.
+    for (const source of ['hackernews', 'appstore', 'reddit'] as const) {
+      await boss.unschedule(ingestQueueName(source));
+    }
+  }, 60_000);
+
+  it('treats an unreadable queue as policy drift rather than a pass', async () => {
+    // `null` means the policy is unknown, and unknown is what this check exists to refuse —
+    // skipping the assertion made the one unreadable case the one case that passed.
+    vi.spyOn(boss, 'getQueue').mockResolvedValue(null);
+    try {
+      await expect(
+        provisionIngestQueues(boss, configFor(scratch.connectionString).scheduler),
+      ).rejects.toMatchObject({ code: 'INGEST_QUEUE_POLICY_DRIFT' });
+    } finally {
+      vi.restoreAllMocks();
+    }
   }, 60_000);
 });
