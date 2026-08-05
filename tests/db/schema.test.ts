@@ -33,6 +33,10 @@ const ALL_TABLES = [
   'scores',
   'briefs',
   'runs',
+  // I-05 (blocker B-08): where an adapter's opaque cursor survives between runs. Like
+  // `runs` it is bookkeeping rather than a derived table, so it is deliberately absent from
+  // DERIVED_TABLES below — it holds no evidence to trace back to `documents`.
+  'source_cursors',
 ];
 
 // Composer resolution F-02 #4: derived tables reach `documents` either via a non-null

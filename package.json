@@ -18,6 +18,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file=.env scripts/db-migrate.ts",
     "db:seed": "tsx --env-file=.env scripts/db-seed.ts",
+    "ingest": "tsx --env-file=.env scripts/ingest.ts",
     "smoke": "tsx --env-file=.env smoke.ts"
   },
   "devDependencies": {

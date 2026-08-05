@@ -12,6 +12,7 @@
 import { inspect } from 'node:util';
 import { z } from 'zod';
 import { ConfigError } from './errors.js';
+import { log } from './log.js';
 
 const REDACTED = '[REDACTED]';
 
@@ -25,12 +26,39 @@ export interface RedditConfig {
   readonly clientId: string;
   readonly clientSecret: string;
   readonly userAgent: string;
+  /**
+   * Which subreddits to sweep. `undefined` means "not configured" and leaves the adapter's
+   * own default in force — this file never restates an adapter default, so the two can
+   * never drift apart (I-05 composer resolution 2).
+   */
+  readonly subreddits: readonly string[] | undefined;
+  /**
+   * Product-visible ingest-volume knob: a post needs this many comments before expansion
+   * spends a request on it. `undefined` leaves the adapter's own default (5) in force.
+   */
+  readonly minCommentsToExpand: number | undefined;
+}
+
+/**
+ * Hacker News and App Store are free and unauthenticated, so unlike `reddit` these are never
+ * `undefined` — the sources always run; only *what* they sweep is configurable. Every field
+ * inside is optional in the same "undefined means the adapter's own default" sense.
+ */
+export interface HackerNewsConfig {
+  readonly queries: readonly string[] | undefined;
+}
+
+export interface AppStoreConfig {
+  readonly appIds: readonly string[] | undefined;
+  readonly territories: readonly string[] | undefined;
 }
 
 interface ConfigFields {
   readonly databaseUrl: string;
   readonly anthropicApiKey: string;
   readonly reddit: RedditConfig | undefined;
+  readonly hackernews: HackerNewsConfig;
+  readonly appstore: AppStoreConfig;
   readonly budgetCeilingUsd: number;
   readonly logLevel: LogLevel;
   readonly nodeEnv: NodeEnv;
@@ -88,13 +116,19 @@ class RedditConfigValue implements RedditConfig {
   declare readonly clientId: string;
   declare readonly clientSecret: string;
   readonly userAgent: string;
+  readonly subreddits: readonly string[] | undefined;
+  readonly minCommentsToExpand: number | undefined;
 
   constructor(fields: RedditConfig) {
     defineHiddenValue(this, 'clientId', fields.clientId);
     defineHiddenValue(this, 'clientSecret', fields.clientSecret);
     // Not a secret (SPEC F-03 resolution 3 table) — a UA string identifying the app to
-    // Reddit's API, not a credential — so it stays a plain, own, enumerable field.
+    // Reddit's API, not a credential — so it stays a plain, own, enumerable field. The two
+    // below are ordinary ingest settings (which subreddits, how many comments before a
+    // thread is worth a request), not credentials, so they get the same treatment.
     this.userAgent = fields.userAgent;
+    this.subreddits = fields.subreddits;
+    this.minCommentsToExpand = fields.minCommentsToExpand;
   }
 }
 
@@ -112,6 +146,8 @@ export class Config implements ConfigFields {
   declare readonly databaseUrl: string;
   declare readonly anthropicApiKey: string;
   declare readonly reddit: RedditConfig | undefined;
+  readonly hackernews: HackerNewsConfig;
+  readonly appstore: AppStoreConfig;
   readonly budgetCeilingUsd: number;
   readonly logLevel: LogLevel;
   readonly nodeEnv: NodeEnv;
@@ -119,11 +155,16 @@ export class Config implements ConfigFields {
   constructor(fields: ConfigFields) {
     defineHiddenValue(this, 'databaseUrl', fields.databaseUrl);
     defineHiddenValue(this, 'anthropicApiKey', fields.anthropicApiKey);
+    // `reddit` stays hidden as a whole because two of its five fields are credentials;
+    // `hackernews` and `appstore` hold no secret at all, so they are ordinary enumerable
+    // fields that a `{...config}` log line may legitimately print.
     defineHiddenValue(
       this,
       'reddit',
       fields.reddit === undefined ? undefined : new RedditConfigValue(fields.reddit),
     );
+    this.hackernews = fields.hackernews;
+    this.appstore = fields.appstore;
     this.budgetCeilingUsd = fields.budgetCeilingUsd;
     this.logLevel = fields.logLevel;
     this.nodeEnv = fields.nodeEnv;
@@ -164,7 +205,11 @@ function redactedView(config: ConfigFields): Record<string, unknown> {
             // Not a secret (SPEC F-03 resolution 3 table) — a UA string identifying the
             // app to Reddit's API, not a credential.
             userAgent: config.reddit.userAgent,
+            subreddits: config.reddit.subreddits,
+            minCommentsToExpand: config.reddit.minCommentsToExpand,
           },
+    hackernews: config.hackernews,
+    appstore: config.appstore,
     budgetCeilingUsd: config.budgetCeilingUsd,
     logLevel: config.logLevel,
     nodeEnv: config.nodeEnv,
@@ -193,6 +238,11 @@ const EnvSchema = z
     REDDIT_CLIENT_ID: z.string().optional(),
     REDDIT_CLIENT_SECRET: z.string().optional(),
     REDDIT_USER_AGENT: z.string().optional(),
+    REDDIT_SUBREDDITS: z.string().optional(),
+    REDDIT_MIN_COMMENTS_TO_EXPAND: z.string().optional(),
+    HN_QUERIES: z.string().optional(),
+    APPSTORE_APP_IDS: z.string().optional(),
+    APPSTORE_TERRITORIES: z.string().optional(),
     BUDGET_CEILING_USD: z.string().optional(),
     LOG_LEVEL: z.string().optional(),
     NODE_ENV: z.string().optional(),
@@ -227,6 +277,16 @@ const EnvSchema = z
       );
     }
 
+    if (
+      data.REDDIT_MIN_COMMENTS_TO_EXPAND !== undefined &&
+      data.REDDIT_MIN_COMMENTS_TO_EXPAND !== ''
+    ) {
+      const parsed = Number(data.REDDIT_MIN_COMMENTS_TO_EXPAND);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        ctx.addIssue('REDDIT_MIN_COMMENTS_TO_EXPAND must be a non-negative integer');
+      }
+    }
+
     if (data.BUDGET_CEILING_USD !== undefined) {
       const parsed = Number(data.BUDGET_CEILING_USD);
       if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -247,6 +307,24 @@ function isOneOf<T extends string>(value: string, options: readonly T[]): value 
   return (options as readonly string[]).includes(value);
 }
 
+/**
+ * Comma-separated list -> array, or `undefined` for "not configured" so the consuming
+ * adapter's own default stays in force. Empty entries are dropped (a trailing comma is a
+ * typo, not a request to sweep the empty string); a value that is entirely empty or only
+ * separators is therefore indistinguishable from the variable being unset, which is the
+ * same "undefined or empty means absent" rule every other field in this file already uses.
+ */
+function parseList(value: string | undefined): readonly string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const items = value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '');
+  return items.length === 0 ? undefined : items;
+}
+
 type ValidatedEnv = z.infer<typeof EnvSchema>;
 
 // Only reachable once `EnvSchema`'s superRefine above has already confirmed every field is
@@ -263,6 +341,12 @@ function toConfig(env: ValidatedEnv): Config {
           clientId: env.REDDIT_CLIENT_ID,
           clientSecret: env.REDDIT_CLIENT_SECRET,
           userAgent: env.REDDIT_USER_AGENT,
+          subreddits: parseList(env.REDDIT_SUBREDDITS),
+          minCommentsToExpand:
+            env.REDDIT_MIN_COMMENTS_TO_EXPAND === undefined ||
+            env.REDDIT_MIN_COMMENTS_TO_EXPAND === ''
+              ? undefined
+              : Number(env.REDDIT_MIN_COMMENTS_TO_EXPAND),
         }
       : undefined;
 
@@ -273,6 +357,11 @@ function toConfig(env: ValidatedEnv): Config {
     databaseUrl: env.DATABASE_URL ?? '',
     anthropicApiKey: env.ANTHROPIC_API_KEY ?? '',
     reddit,
+    hackernews: { queries: parseList(env.HN_QUERIES) },
+    appstore: {
+      appIds: parseList(env.APPSTORE_APP_IDS),
+      territories: parseList(env.APPSTORE_TERRITORIES),
+    },
     budgetCeilingUsd:
       env.BUDGET_CEILING_USD === undefined
         ? DEFAULT_BUDGET_CEILING_USD
@@ -317,6 +406,51 @@ export function loadConfigFromEnv(): Config {
 }
 
 /**
+ * Settings that only mean something once Reddit has credentials. Without them I-05 leaves
+ * the Reddit adapter out of the registry entirely (blocker B-09 — Reddit blocks
+ * unauthenticated API access), so these are read by nothing.
+ *
+ * Fix round 1, Finding 5: this used to be a hard `ConfigError`, which meant deleting Reddit
+ * credentials from a `.env` that still named subreddits stopped Hacker News and App Store
+ * ingestion too — a whole-pipeline outage over a setting for one source. The silence it was
+ * guarding against no longer exists either: the registry records the skip with its reason
+ * and the orchestrator writes that onto every run row. A warning is the proportionate
+ * response, so the two sources that *can* run keep running.
+ *
+ * It lives here rather than in `loadConfig` deliberately: `loadConfig` is pure by contract
+ * ("no global state, no I/O, safe to call with a literal object in tests") and a validator
+ * that writes to stdout would not be. `bootConfig` is already the impure boot-time entry
+ * point — it writes to stderr and calls `process.exit` — so the warning belongs with it.
+ */
+const REDDIT_SETTINGS_NEEDING_CREDENTIALS = [
+  'REDDIT_SUBREDDITS',
+  'REDDIT_MIN_COMMENTS_TO_EXPAND',
+] as const;
+
+function warnAboutUnusableRedditSettings(config: Config, env: NodeJS.ProcessEnv): void {
+  if (config.reddit !== undefined) {
+    return;
+  }
+  const configured = REDDIT_SETTINGS_NEEDING_CREDENTIALS.filter((name) => {
+    const value = env[name];
+    return value !== undefined && value !== '';
+  });
+  if (configured.length === 0) {
+    return;
+  }
+  log.warn(
+    'Reddit settings are configured but Reddit has no credentials, so they will be ignored',
+    {
+      // Names only, never values — the same rule the ConfigError messages follow, and
+      // REDDIT_SUBREDDITS is not a secret but neighbours two that are.
+      ignored: configured,
+      required: ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT'],
+      effect: 'Reddit ingestion is skipped; every other source runs normally',
+    },
+  );
+}
+
+/**
  * Boot-time entry point (SPEC F-03 criterion 1). `loadConfig`/`loadConfigFromEnv` never
  * call `process.exit` themselves — a library that can kill the process is untestable —
  * so this is the one place that catches `ConfigError`, writes its message to stderr, and
@@ -325,7 +459,9 @@ export function loadConfigFromEnv(): Config {
  */
 export function bootConfig(): Config {
   try {
-    return loadConfigFromEnv();
+    const config = loadConfigFromEnv();
+    warnAboutUnusableRedditSettings(config, process.env);
+    return config;
   } catch (err) {
     if (err instanceof ConfigError) {
       process.stderr.write(`${err.message}\n`);

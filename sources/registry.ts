@@ -1,23 +1,42 @@
 // The only door onto a platform adapter's internals (SPEC I-01 criterion 3; composer
 // resolution 4): eslint.config.js's ADAPTER_DEEP_IMPORT_BAN mechanically forbids importing
 // `sources/hackernews/*`, `sources/appstore/*`, or `sources/reddit/*` from anywhere except
-// this file, with a paired positive/negative proof in tests/eslint-rules.test.ts. I-02,
-// I-03, and I-04 each add one import and one array entry to the `registry` instance below
-// as their adapter lands; nothing else in the repo should ever import an adapter module
-// directly.
+// this file, with a paired positive/negative proof in tests/eslint-rules.test.ts. Nothing
+// else in the repo should ever import an adapter module directly.
 //
-// A factory (`createSourceRegistry`) rather than a mutable module-level map, mirroring
-// lib/net.ts's `createNetClient`/`netClient` split — that module's own comment explains why:
-// tests build one per case "so state never leaks between them". The same reasoning applies
-// here: a shared mutable registry would let one test's registration bleed into an unrelated
-// test's lookup for the same source. `registry` below is this file's equivalent of
-// `netClient` — the ready instance production code imports.
+// Two factories, for two different jobs. `createSourceRegistry(adapters)` is the low-level
+// constructor — an explicit adapter list in, a registry out — mirroring lib/net.ts's
+// `createNetClient`, whose own comment explains why a factory beats a mutable module-level
+// map: tests build one per case "so state never leaks between them". `createRegistry(config)`
+// on top of it is the production wiring: it decides *which* adapters exist and hands each one
+// its configuration, following the same `createDb(connectionString)` /
+// `createNetClient(options)` shape the rest of the codebase already uses.
+//
+// I-05 composer resolution 2 replaced the previous `export const registry` singleton, which
+// built all three adapters with their own defaults. That made every entry inert — Reddit in
+// particular cannot fetch anything without credentials — and was a consequence of wave 3's
+// "exactly two lines of this file" rule, which was what let the three adapters be written
+// concurrently without a three-way collision. There is no configuration-free registry any
+// more, because there is no such thing as a usable configuration-free registry.
 import { AppError } from '../lib/errors.js';
+import type { Config } from '../lib/config.js';
 import type { Source } from '../lib/types.js';
 import { createAppStoreAdapter } from './appstore/adapter.js';
 import { createHackerNewsAdapter } from './hackernews/adapter.js';
 import { createRedditAdapter } from './reddit/adapter.js';
 import type { SourceAdapter } from './types.js';
+
+/**
+ * A source that has no adapter in this registry because it is *configured off* — not an
+ * error and not a failure, but not something to lose track of either. I-05 records these on
+ * the `runs` row so "Reddit produced nothing this run" is distinguishable from "Reddit was
+ * never asked", which a bare absence from `list()` would not be.
+ */
+export interface SkippedSource {
+  readonly source: Source;
+  /** Human-readable — recorded verbatim by I-05, never parsed. */
+  readonly reason: string;
+}
 
 export interface SourceRegistry {
   /**
@@ -31,6 +50,11 @@ export interface SourceRegistry {
    */
   get(source: Source): SourceAdapter;
   list(): readonly Source[];
+  /**
+   * Sources deliberately left out, with the reason. Empty for a registry built directly from
+   * an adapter list — "not passed in" carries no explanation worth recording.
+   */
+  skipped(): readonly SkippedSource[];
 }
 
 /**
@@ -40,7 +64,10 @@ export interface SourceRegistry {
  * copy-pasted from a different adapter), and construction time is the cheapest place to
  * catch that, well before any run depends on which of the two silently "won".
  */
-export function createSourceRegistry(adapters: readonly SourceAdapter[]): SourceRegistry {
+export function createSourceRegistry(
+  adapters: readonly SourceAdapter[],
+  skipped: readonly SkippedSource[] = [],
+): SourceRegistry {
   const bySource = new Map<Source, SourceAdapter>();
   for (const adapter of adapters) {
     if (bySource.has(adapter.source)) {
@@ -52,6 +79,20 @@ export function createSourceRegistry(adapters: readonly SourceAdapter[]): Source
     }
     bySource.set(adapter.source, adapter);
   }
+
+  for (const entry of skipped) {
+    if (bySource.has(entry.source)) {
+      // A source cannot be both registered and skipped: whichever of the two a caller then
+      // consulted would decide the run's behaviour, and the other would be a silent lie.
+      throw new AppError(
+        'ADAPTER_REGISTERED_AND_SKIPPED',
+        `Source "${entry.source}" is both registered and marked skipped`,
+        { context: { source: entry.source } },
+      );
+    }
+  }
+
+  const skippedCopy = [...skipped];
 
   return {
     get(source) {
@@ -66,23 +107,61 @@ export function createSourceRegistry(adapters: readonly SourceAdapter[]): Source
       return adapter;
     },
     list: () => [...bySource.keys()],
+    skipped: () => [...skippedCopy],
   };
 }
 
 /**
- * The production registry ingest code imports. Nothing else in the repo should construct its
- * own registry outside tests, which use `createSourceRegistry` directly with fakes instead of
- * mutating this shared instance.
+ * The production wiring: every adapter the supplied `Config` can actually run, each built
+ * with that configuration, plus an explanation for every source left out.
  *
- * Every adapter here is currently built with its own defaults, which means every one of them
- * is inert — Reddit in particular cannot fetch anything without credentials. That is a
- * consequence of wave 3's "exactly two lines of this file" rule, which was what let the three
- * adapters be written concurrently without a three-way collision. I-05 replaces this with a
- * `createRegistry(config)` factory, following the `createDb(connectionString)` /
- * `createNetClient(options)` pattern the rest of the codebase already uses.
+ * Hacker News and App Store are free and unauthenticated, so they are always registered —
+ * with configured queries/app ids/territories where the config supplies them, and each
+ * adapter's own defaults where it does not. Reddit is registered only when credentials are
+ * present: it blocks unauthenticated API access outright (blocker B-09), so without them the
+ * adapter cannot fetch a single document, and registering an adapter guaranteed to throw
+ * `ConfigError` on first call would turn a configuration choice into a run failure.
+ *
+ * Every option below is passed straight through, `undefined` included. `exactOptionalPropertyTypes`
+ * is off in this repo's tsconfig, so an explicitly-`undefined` property is accepted where an
+ * optional one is declared, and each adapter factory resolves it with its own `?? DEFAULT` —
+ * which is why this file restates no adapter default and the two can never drift apart.
  */
-export const registry: SourceRegistry = createSourceRegistry([
-  createAppStoreAdapter(),
-  createHackerNewsAdapter(),
-  createRedditAdapter(),
-]);
+export function createRegistry(config: Config): SourceRegistry {
+  const adapters: SourceAdapter[] = [
+    createHackerNewsAdapter({ queries: config.hackernews.queries }),
+    createAppStoreAdapter({
+      appIds: config.appstore.appIds,
+      territories: config.appstore.territories,
+    }),
+  ];
+  const skipped: SkippedSource[] = [];
+
+  const reddit = config.reddit;
+  if (reddit === undefined) {
+    skipped.push({
+      source: 'reddit',
+      reason:
+        'No Reddit credentials configured (REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT) — Reddit blocks unauthenticated API access, so the adapter cannot fetch anything',
+    });
+  } else {
+    adapters.push(
+      createRedditAdapter({
+        clientId: reddit.clientId,
+        clientSecret: reddit.clientSecret,
+        userAgent: reddit.userAgent,
+        subreddits: reddit.subreddits,
+        // Spread into a `Partial<RedditCommentExpansionOptions>` inside the adapter, where a
+        // present-but-undefined key would overwrite the adapter's own default with
+        // `undefined` rather than falling back to it — so the whole object is omitted when
+        // there is nothing to override, instead of the key being set to `undefined`.
+        commentExpansion:
+          reddit.minCommentsToExpand === undefined
+            ? undefined
+            : { minCommentsToExpand: reddit.minCommentsToExpand },
+      }),
+    );
+  }
+
+  return createSourceRegistry(adapters, skipped);
+}
