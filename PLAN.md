@@ -37,7 +37,7 @@ whose `PLAN.md` entry is missing is not done.
 
 **Phase:** 0 — Foundation
 **Active tasks:** none
-**Next up:** F-03
+**Next up:** F-05 fix round → whole-branch review → Phase 0 PR
 **Rolling 30-day projected spend:** $0.00 (ceiling: $70.00)
 
 **Phase 0 dispatch order:** F-01 → F-06 → **(F-02 ∥ F-03)** → **(F-04 ∥ F-05)** → final
@@ -65,8 +65,9 @@ a time with `pnpm verify` re-run after each merge.
 | F-02 | Database schema and migrations | DONE | F-01 | — | `97b3834` (1 fix round) |
 | F-03 | Config and secrets | DONE | F-01, F-06 | — | `201080d` (1 fix round) |
 | R-01 | Reconcile `drizzle.config.ts` with the `process.env` ban | DONE | F-02, F-03 | — | `964c65e` — composer-created; merge fallout, not a `SPEC.md` task |
-| F-04 | `lib/net.ts` | WIP | F-01, F-03, F-06 | — | Gates all of Phase 1 |
-| F-05 | `lib/llm.ts` + `lib/budget.ts` | READY | F-01, F-02, F-03, F-06 | — | Gates all of Phase 2 |
+| F-04 | `lib/net.ts` | DONE | F-01, F-03, F-06 | — | `e18bf90` — review clean first pass |
+| F-05 | `lib/llm.ts` + `lib/budget.ts` | REVIEW | F-01, F-02, F-03, F-06 | — | `f0d2ddd` — fix round 1 in flight |
+| R-02 | Derive `allowDefaultProject` from disk state | DONE | F-04, F-05 | — | `5f00237` — composer-created; unblocks the whole repo's lint |
 | F-06 | Error taxonomy and logging | DONE | F-01 | — | `e76b023` (1 fix round) |
 
 ### Phase 1 — Ingestion
@@ -145,6 +146,7 @@ condition, the task it blocks, and what would resolve it.*
 | B-02 | C-01 | No hand-labeled cluster set | Hand-cluster ~100 extracted pain points |
 | B-03 | C-04 | No labeled saturated-market examples | Identify ≥5 clusters with known mature solutions for negative testing |
 | B-04 | X-01, X-02 | **No embedding provider is named anywhere in the spec or stack table, and Anthropic does not offer an embeddings API.** The whole cost thesis rests on the embedding prefilter, so this is a load-bearing gap, not a detail | Choose a provider and model, add it to the stack table, and price it at 50k documents/month against the $70 ceiling. F-02 pins the vector column at `1536` as a placeholder; a different model means a forward migration |
+| B-06 | I-02, I-04 | **`lib/net.ts`'s terminal-failure contract is asymmetric.** An exhausted 429 throws `RateLimitError`, but an exhausted 5xx returns the raw `Response`. An adapter author must therefore branch on `response.status >= 500` *in addition* to catching typed errors, or a persistently-failing upstream silently reads as "got a response" | Settle it in **I-01**, when the `SourceAdapter` consumer contract is designed and we know what adapters actually need. Either add an `HttpStatusError` to `lib/errors.ts` and throw symmetrically, or make returning the response the documented contract for every non-retryable status including 429 |
 | B-05 | I-05, I-06 | **Nothing can run a TypeScript entry point.** F-02 had to delete its `db:migrate` and `db:seed` scripts: bare `node <file>.ts` cannot resolve this repo's `.js`-import-specifier-to-`.ts`-file convention outside vitest's transform. The seed script is tested but not operationally invokable | A small task adding a runner (`tsx`, or `node --experimental-strip-types` with matching resolution settings), or a change to F-01's module resolution. Needed before any scheduled or CLI-invoked pipeline stage exists |
 
 These three are human-input blockers, not agent-solvable. They gate the phases where
