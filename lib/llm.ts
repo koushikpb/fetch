@@ -262,7 +262,15 @@ export function createAnthropicClient(apiKey: string): LlmClient {
         assertAllowedModel(params.model);
         return sdk.messages.create(params);
       },
-      countTokens: (params) => sdk.messages.countTokens(params),
+      // R-03 fix round (Important, Finding 1): this was a bare pass-through, the one route
+      // fix round 1 missed when it added the guard to `create` and `batches.create` — the
+      // same "a type assertion, an untyped JS caller, or any future third route... would
+      // sail straight past it" reasoning applies here identically. `async` for the same
+      // reason as `create` above: guarantees the throw surfaces as a rejected Promise.
+      countTokens: async (params) => {
+        assertAllowedModel(params.model);
+        return sdk.messages.countTokens(params);
+      },
       batches: {
         create: async (params) => {
           for (const request of params.requests) {
@@ -298,7 +306,22 @@ export interface RunsRepo {
   /** `SUM(cost_usd)` over `runs` rows whose `started_at` falls within the trailing window
    *  ending at `now` (composer resolution #6). Returns 0 when no rows fall in the window. */
   getTrailingSpendUsd(windowDays: number, now: Date): Promise<number>;
-  /** Adds `increment`'s tokens and cost to run `runId`'s running totals and persists them. */
+  /**
+   * Inserts a new `runs` row for `stage` and returns its id. This is the only supported way
+   * to obtain a `runId` that `recordUsage` will accept (R-03 fix round, Finding 2) — nothing
+   * else in this module inserts into `runs`, so a caller who calls this first cannot arrive
+   * at `recordUsage` without a row already in place.
+   */
+  createRun(stage: string): Promise<string>;
+  /**
+   * Adds `increment`'s tokens and cost to run `runId`'s running totals and persists them.
+   *
+   * Precondition: a `runs` row for `runId` must already exist — call `createRun` first.
+   * `recordUsage` throws `ConfigError` (context: `{ runId }`) rather than silently no-op'ing
+   * when no row matches, because a silent no-op here means all token/cost accounting for the
+   * call that produced `increment` disappears with zero signal (CLAUDE.md rule 6: cost is a
+   * correctness property).
+   */
   recordUsage(runId: string, increment: RunUsageIncrement): Promise<void>;
 }
 
@@ -313,12 +336,29 @@ export function createDrizzleRunsRepo(db: Db): RunsRepo {
       const total = row?.total;
       return total === null || total === undefined ? 0 : Number(total);
     },
+    async createRun(stage) {
+      // Every other column either has a default (`status`, `started_at`, `counts`,
+      // `errors`) or is nullable (`finished_at`, the token/cost/model columns, populated
+      // later by `recordUsage`) — `stage` is the only value a caller must supply.
+      const [row] = await db.insert(runs).values({ stage }).returning({ id: runs.id });
+      if (row === undefined) {
+        // Postgres guarantees a single-row RETURNING for a single-row INSERT that does not
+        // violate a constraint — reaching this means the insert itself failed silently
+        // somewhere upstream, which is exactly the kind of accounting gap this fix round
+        // exists to close. ConfigError for the same reason recordUsage's no-row case below
+        // uses it: a precondition violation, not a network/timeout/rate-limit/budget outcome.
+        throw new ConfigError(`createRun: insert into runs returned no row for stage "${stage}"`, {
+          context: { stage },
+        });
+      }
+      return row.id;
+    },
     async recordUsage(runId, increment) {
       // Round exactly once, here, at the point of persistence (composer resolution #4) —
       // `costUsd` is numeric(10,4); a single cheap Haiku call can otherwise round to
       // 0.0000 if rounded per call upstream and only summed afterward.
       const roundedCostUsd = Math.round(increment.costUsd * 10_000) / 10_000;
-      await db
+      const result = await db
         .update(runs)
         .set({
           model: increment.model,
@@ -327,6 +367,19 @@ export function createDrizzleRunsRepo(db: Db): RunsRepo {
           costUsd: sql`coalesce(${runs.costUsd}, 0) + ${roundedCostUsd}`,
         })
         .where(eq(runs.id, runId));
+      // R-03 fix round (Important, Finding 2): the reviewer reproduced this against a live
+      // database — an UPDATE ... WHERE id = $1 matching no row previously returned normally
+      // with no throw, no log, and no row, so a runId typo or a missing `createRun` call
+      // silently dropped all cost accounting for that call. `rowCount` is `number | null` on
+      // the underlying `pg` driver's QueryResult (null only for statements that don't report
+      // one, which UPDATE is not), so `?? 0` treats an unexpected null the same as zero rows
+      // affected rather than treating it as success.
+      if ((result.rowCount ?? 0) === 0) {
+        throw new ConfigError(
+          `recordUsage: no run row exists for runId "${runId}" — call RunsRepo.createRun() before recordUsage() (CLAUDE.md rule 6: cost is a correctness property)`,
+          { context: { runId } },
+        );
+      }
     },
   };
 }
