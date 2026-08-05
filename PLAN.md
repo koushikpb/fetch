@@ -64,7 +64,7 @@ a time with `pnpm verify` re-run after each merge.
 | F-01 | Repo scaffold and tooling | DONE | — | — | `e5814f1` |
 | F-02 | Database schema and migrations | DONE | F-01 | — | `97b3834` (1 fix round) |
 | F-03 | Config and secrets | DONE | F-01, F-06 | — | `201080d` (1 fix round) |
-| R-01 | Reconcile `drizzle.config.ts` with the `process.env` ban | WIP | F-02, F-03 | — | Composer-created; merge fallout, not a `SPEC.md` task |
+| R-01 | Reconcile `drizzle.config.ts` with the `process.env` ban | DONE | F-02, F-03 | — | `964c65e` — composer-created; merge fallout, not a `SPEC.md` task |
 | F-04 | `lib/net.ts` | WIP | F-01, F-03, F-06 | — | Gates all of Phase 1 |
 | F-05 | `lib/llm.ts` + `lib/budget.ts` | READY | F-01, F-02, F-03, F-06 | — | Gates all of Phase 2 |
 | F-06 | Error taxonomy and logging | DONE | F-01 | — | `e76b023` (1 fix round) |
