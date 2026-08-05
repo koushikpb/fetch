@@ -222,22 +222,32 @@ interface WindowResult {
  * anything at exactly that timestamp on every subsequent call, forever. The unfetched twin
  * was gone with no error, no log, and no way for a later run to ever reach it again.
  *
- * The fix (composer resolution, fix round 1): when capped, the boundary this call claims is
- * never the maximum `created_at_i` actually fetched — it is the *second-highest distinct*
- * value fetched. Any value strictly below the maximum is provably safe to claim, because the
- * fetched pages are a contiguous, closest-to-`sinceSec` chunk of the query's globally sorted
- * result set: nothing smaller than what we fetched could possibly have been excluded. Only
- * the single highest value sits at the actual cut point and could have an unfetched twin
- * beyond it, so it is always left for a later call to re-cover in full — together with
- * anything else sharing that exact second, fetched or not. This is "err toward re-fetching,
- * never toward skipping": a duplicate costs one wasted request (`documents`'s
- * `(source, source_id)` uniqueness and I-05's dedup absorb it for free); a skip is permanent
- * and CLAUDE.md rule 1 does not tolerate it. If literally every item this call fetched for a
- * query shares one exact second (no distinct lower value exists to retreat to — unreachable
- * at the default 20-page/1000-hitsPerPage cap, which would require >20,000 items in one
- * second of Hacker News activity), that query contributes no progress this call rather than
- * an unsafe one; see the boundary-tie test in tests/sources/hackernews/adapter.test.ts for
- * the reproduction this closes.
+ * Fix round 1's boundary — retreat to the *second-highest distinct* `created_at_i` fetched,
+ * never the maximum — is safe because the fetched pages are a contiguous, closest-to-
+ * `sinceSec` chunk of the query's globally sorted result set: nothing smaller than what we
+ * fetched could possibly have been excluded, so any value strictly below the maximum is
+ * provably clear of the tie risk. Only the single highest value sits at the actual cut point
+ * and could have an unfetched twin beyond it, so it is always left for a later call to
+ * re-cover in full — together with anything else sharing that exact second, fetched or not.
+ * This is "err toward re-fetching, never toward skipping": a duplicate costs one wasted
+ * request (`documents`'s `(source, source_id)` uniqueness and I-05's dedup absorb it for
+ * free); a skip is permanent and CLAUDE.md rule 1 does not tolerate it.
+ *
+ * Fix round 2 is what to do when there is no second-highest distinct value to retreat to.
+ * That is *not* only the astronomically unlikely case of thousands of items sharing one
+ * second (the default 20-page/1000-hitsPerPage cap would need >20,000 items in one second of
+ * Hacker News activity for that) — it is far more reachably whatever leaves a capped call's
+ * fetched set with a single distinct value: a shrinking backfill range's tail page, or a
+ * small `maxPagesPerQuery`/`hitsPerPage` configuration, can do this with perfectly ordinary
+ * data. Either way `confirmedThroughSec` collapses to the unchanged `sinceSec` — no value
+ * exists to safely claim. Returning that as an ordinary cursor would hand the caller back
+ * the exact token it just passed in, and a caller honoring `SourceAdapter.fetchBackfill`'s
+ * own contract ("stop once it comes back undefined") would instead loop forever reissuing an
+ * identical, unproductive request — a hot loop against a third-party API (CLAUDE.md rule 4),
+ * not merely a stalled cursor. Detecting that condition and reporting `outcome: { kind:
+ * 'truncated', reason }` instead turns it into a terminating, recordable signal I-05 can act
+ * on. See the boundary-tie and no-progress-signal tests in
+ * tests/sources/hackernews/adapter.test.ts for the reproductions these two rounds close.
  */
 async function collectWindow(
   net: NetClient,
@@ -255,6 +265,10 @@ async function collectWindow(
   let confirmedThroughSec = untilSec;
   const lowerOperator = sinceInclusive ? '>=' : '>';
   const numericFilters = `created_at_i${lowerOperator}${sinceSec},created_at_i<=${untilSec}`;
+  // Fix round 2: queries whose capped fetch left no distinct value above `sinceSec` to
+  // retreat to — collected so the 'truncated' reason (below) can name the actual cause
+  // rather than just reporting "stuck".
+  const stalledQueries: string[] = [];
 
   try {
     for (const query of queries) {
@@ -304,7 +318,30 @@ async function collectWindow(
         // query's own boundary — claiming any more would mean trusting a query that was
         // capped short as if it had been fully walked.
         confirmedThroughSec = Math.min(confirmedThroughSec, secondMaxSeenSec);
+        // `secondMaxSeenSec` can never fall below `sinceSec` (it is seeded there and only
+        // ever reassigned to a larger observed value), so equality is the only way this
+        // query contributed zero progress — see the doc comment above for why that happens
+        // on perfectly ordinary data, not just pathological ones.
+        if (secondMaxSeenSec <= sinceSec) {
+          stalledQueries.push(query === '' ? '(default empty query)' : query);
+        }
       }
+    }
+
+    if (stalledQueries.length > 0) {
+      // At least one query could not advance the shared boundary this call maintains across
+      // every configured query (`confirmedThroughSec` is the minimum across all of them), so
+      // the call as a whole cannot honestly claim any progress. Salvage whatever was
+      // hydrated, but signal `truncated` rather than minting back the same cursor the caller
+      // passed in — see collectWindow's doc comment (fix round 2) for why silently doing the
+      // latter is a hot-loop risk, not just an inefficiency.
+      const reason =
+        `hackernews: quer${stalledQueries.length === 1 ? 'y' : 'ies'} ` +
+        `${stalledQueries.map((q) => `"${q}"`).join(', ')} capped at ${maxPagesPerQuery} ` +
+        `page(s) per call, but the fetched set contains no created_at_i distinctly above ` +
+        `${sinceSec} to safely advance to — an unfetched item may share that exact second. ` +
+        `Increase maxPagesPerQuery or hitsPerPage for this configuration to make progress.`;
+      return { documents, confirmedThroughSec: sinceSec, outcome: { kind: 'truncated', reason } };
     }
     return { documents, confirmedThroughSec };
   } catch (err) {
@@ -326,8 +363,12 @@ async function collectWindow(
 
 function resultToPage(result: WindowResult): FetchPage {
   if (result.outcome !== undefined) {
-    // A 'partial' result never advances the cursor (see collectWindow's comment) — the next
-    // call replays the same starting boundary.
+    // Neither outcome carries a resumable cursor, but for different reasons (FetchPage's own
+    // doc comment draws this distinction): 'partial' means a fan-out failure cut this call
+    // short, so the next call simply replays the same starting boundary from scratch;
+    // 'truncated' means this call structurally cannot page any further under its current
+    // configuration — see collectWindow's doc comment (fix round 2) for why minting a cursor
+    // back to the caller in that second case would be a lie, not just unhelpful.
     return { documents: result.documents, cursor: undefined, outcome: result.outcome };
   }
   return { documents: result.documents, cursor: String(result.confirmedThroughSec) };

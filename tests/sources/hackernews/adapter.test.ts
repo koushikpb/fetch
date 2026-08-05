@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { createNetClient, type Transport } from '../../../lib/net.js';
 import { NetworkError } from '../../../lib/errors.js';
 import { createHackerNewsAdapter } from '../../../sources/hackernews/adapter.js';
+import type { FetchPage } from '../../../sources/types.js';
 import firebaseStory from '../../fixtures/hackernews/firebase-story.json' with { type: 'json' };
 import firebaseComment from '../../fixtures/hackernews/firebase-comment.json' with { type: 'json' };
 import firebaseDeleted from '../../fixtures/hackernews/firebase-deleted.json' with { type: 'json' };
@@ -403,11 +404,13 @@ describe('createHackerNewsAdapter', () => {
       const seenCounts = new Map<string, number>();
       let cursor: string | undefined;
       let sawCappedPage = false;
+      let totalDocuments = 0;
       for (let i = 0; i < 10; i++) {
         const page = await adapter.fetchIncremental(cursor);
         if (page.documents.length > 0 && page.documents.length < total) {
           sawCappedPage = true;
         }
+        totalDocuments += page.documents.length;
         for (const doc of page.documents) {
           seenCounts.set(doc.sourceId, (seenCounts.get(doc.sourceId) ?? 0) + 1);
         }
@@ -422,6 +425,14 @@ describe('createHackerNewsAdapter', () => {
       for (const [, count] of seenCounts) {
         expect(count).toBeLessThanOrEqual(2); // bounded re-fetch, not unbounded duplication
       }
+      // An exact count, not just the <= 2 per-item bound above: a per-item bound alone
+      // cannot distinguish the correct "second-highest distinct value" boundary from a
+      // mutant that retreats by some other fixed amount (e.g. `max - 1`) and happens to
+      // produce the same per-item duplication pattern on this fixture's spacing. Pinning the
+      // exact total across the whole run (verified against this implementation, not derived
+      // by hand) catches a regression in the boundary arithmetic that a looser bound would
+      // pass through silently.
+      expect(totalDocuments).toBe(12);
     });
   });
 
@@ -476,13 +487,14 @@ describe('createHackerNewsAdapter', () => {
       expect(secondIds.has(TIED_EXCLUDED)).toBe(true);
     });
 
-    it('claims no progress when every item a capped query fetched ties one exact second', async () => {
+    it('signals outcome "truncated" when every item a capped query fetched ties one exact second', async () => {
       const sinceSec = NOW_SEC - 3600;
       const tiedSec = sinceSec + 50;
       // All six items share one exact created_at_i — the degenerate case where no distinct
       // value below the tied maximum exists to safely retreat to (collectWindow's doc
-      // comment calls this "unreachable... in practice" at realistic page caps, but the code
-      // must still degrade safely rather than claim an unsafe boundary if it ever occurs).
+      // comment calls this "unreachable... in practice" at realistic page caps for the
+      // thousands-of-items-per-second version, but the far more reachable
+      // small-fetched-set version, fix round 2 handles the same way).
       // Distinct, canonical-decimal objectIDs (rather than e.g. `tied-0`) so sourceId stays
       // meaningfully distinguishable across items even though every timestamp is identical.
       const hits: FixtureHit[] = Array.from({ length: 6 }, (_, i) => ({
@@ -499,17 +511,17 @@ describe('createHackerNewsAdapter', () => {
 
       expect(first.documents.length).toBeGreaterThan(0); // this call still salvages what it fetched
       expect(first.documents.length).toBeLessThan(hits.length); // but did not walk every page
-      // No distinct value below the tie exists, so the call cannot honestly claim any
-      // progress: the reported boundary equals the same sinceSec the call started from, not
-      // the tied timestamp — "no progress" rather than "unsafe progress".
-      expect(first.cursor).toBe(String(sinceSec));
-
-      const second = await adapter.fetchIncremental(first.cursor);
-      const secondIds = new Set(second.documents.map((d) => d.sourceId));
-      const firstIds = new Set(first.documents.map((d) => d.sourceId));
-      // Replaying the identical, unadvanced boundary re-covers the same window deterministically
-      // rather than skipping forward past the still-unclaimed tied timestamp.
-      expect(secondIds).toEqual(firstIds);
+      // Fix round 2 (originally this test pinned the pre-round-2 stall as correct behavior —
+      // it was not: silently returning `cursor: sinceSec` here hands a caller obeying
+      // fetchIncremental's "stop once undefined" contract a cursor that reproduces this
+      // identical, unproductive call forever, a hot loop against a third-party API
+      // (CLAUDE.md rule 4)). No distinct value below the tie exists, so this call cannot
+      // honestly claim any progress — it now reports that as a terminating signal instead.
+      expect(first.cursor).toBeUndefined();
+      expect(first.outcome?.kind).toBe('truncated');
+      if (first.outcome?.kind === 'truncated') {
+        expect(first.outcome.reason.length).toBeGreaterThan(0);
+      }
     });
   });
 
@@ -580,15 +592,11 @@ describe('createHackerNewsAdapter', () => {
         created_at_i: sinceSec + Math.floor(((untilSec - sinceSec) * (i + 1)) / (total + 1)),
       }));
       const firebaseItems = Object.fromEntries(hits.map((h) => [h.objectID, { ...firebaseComment, id: Number(h.objectID) }]));
-      // maxPagesPerQuery 2, not 1: with a page cap of exactly one page, a capped call's
-      // single fetched page can itself hold just one item as the range's tail thins out,
-      // leaving zero distinct values fetched that call to retreat to — collectWindow then
-      // (correctly, per its own safety rule) claims no progress at all, which can repeat
-      // every call thereafter since nothing about a deterministic fixture ever changes. That
-      // is a real liveness edge, distinct from the tied-timestamp bug this round fixes, and
-      // is reported separately rather than fixed here (see the fix-round report). Two pages
-      // per call keeps this test's fetched set large enough to always contain a genuine
-      // second distinct value, so it exercises capping without tripping over that edge.
+      // maxPagesPerQuery 2: large enough that every capped call's fetched set contains a
+      // genuine second distinct value, so this scenario exercises capping-with-resumption
+      // through to ordinary exhaustion (cursor undefined, no outcome) rather than the
+      // no-progress edge covered separately below (fix round 2's `maxPagesPerQuery: 1`
+      // reproduction, "resumes across multiple capped calls until..." further down).
       const { adapter } = buildAdapter(
         { hits, firebaseItems },
         { nowMs: NOW_MS, hitsPerPage: 2, maxPagesPerQuery: 2 },
@@ -601,12 +609,16 @@ describe('createHackerNewsAdapter', () => {
       // re-fetch count, not "zero duplicates ever".
       const seenCounts = new Map<string, number>();
       let cursor: string | undefined;
+      let totalDocuments = 0;
+      let lastPageOutcome: unknown;
       for (let i = 0; i < 10; i++) {
         const page = await adapter.fetchBackfill({ since: rangeSince, until: rangeUntil }, cursor);
+        totalDocuments += page.documents.length;
         for (const doc of page.documents) {
           seenCounts.set(doc.sourceId, (seenCounts.get(doc.sourceId) ?? 0) + 1);
         }
         if (page.cursor === undefined) {
+          lastPageOutcome = page.outcome;
           break;
         }
         cursor = page.cursor;
@@ -616,6 +628,95 @@ describe('createHackerNewsAdapter', () => {
       for (const [, count] of seenCounts) {
         expect(count).toBeLessThanOrEqual(2);
       }
+      // Ordinary exhaustion, not a no-progress signal: this range genuinely drains under
+      // this configuration, so the terminating page must carry no `outcome` at all.
+      expect(lastPageOutcome).toBeUndefined();
+      // Exact total (verified by running, not derived by hand — see fix round 2's report):
+      // a looser "<= 2 per item" bound alone would still pass a mutant that retreats by a
+      // fixed amount other than the true second-highest-distinct value, as long as it
+      // produces the same per-item duplication count on this fixture.
+      expect(totalDocuments).toBe(7);
+    });
+
+    it('resumes across multiple capped calls until a genuine no-progress page is reported as truncated, rather than draining or stalling', async () => {
+      const rangeSince = new Date((NOW_SEC - 1000) * 1000);
+      const rangeUntil = new Date((NOW_SEC - 500) * 1000);
+      const sinceSec = Math.floor(rangeSince.getTime() / 1000);
+      const untilSec = Math.floor(rangeUntil.getTime() / 1000);
+      const total = 6;
+      const hits: FixtureHit[] = Array.from({ length: total }, (_, i) => ({
+        objectID: String(200 + i),
+        created_at_i: sinceSec + Math.floor(((untilSec - sinceSec) * (i + 1)) / (total + 1)),
+      }));
+      const firebaseItems = Object.fromEntries(hits.map((h) => [h.objectID, { ...firebaseComment, id: Number(h.objectID) }]));
+      // maxPagesPerQuery 1: as this range's remaining tail thins out, a capped call's single
+      // fetched page can end up holding just one item, leaving no second distinct
+      // created_at_i to retreat to. Fix round 1 alone left this call to silently reissue the
+      // identical cursor forever — a hot loop against a third-party API (CLAUDE.md rule 4)
+      // that a caller obeying fetchBackfill's own "stop once cursor comes back undefined"
+      // contract cannot detect (identical cursor, non-empty documents, no outcome). Fix
+      // round 2 reports `outcome: 'truncated'` and terminates instead. This exact scenario
+      // (verified by running the adapter directly, not derived by hand) does not drain the
+      // full range — it terminates after two calls having covered only 2 of 6 items.
+      const { adapter } = buildAdapter(
+        { hits, firebaseItems },
+        { nowMs: NOW_MS, hitsPerPage: 2, maxPagesPerQuery: 1 },
+      );
+
+      const pages: FetchPage[] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < 10; i++) {
+        const page = await adapter.fetchBackfill({ since: rangeSince, until: rangeUntil }, cursor);
+        pages.push(page);
+        if (page.cursor === undefined) {
+          break;
+        }
+        cursor = page.cursor;
+      }
+
+      // Terminates in exactly two calls — not an unbounded loop, and not a silent drain that
+      // happens to still reach 6/6 anyway.
+      expect(pages).toHaveLength(2);
+      expect(pages[0]?.cursor).toBeDefined();
+      expect(pages[0]?.outcome).toBeUndefined();
+      expect(pages[1]?.cursor).toBeUndefined();
+      expect(pages[1]?.outcome?.kind).toBe('truncated');
+      if (pages[1]?.outcome?.kind === 'truncated') {
+        expect(pages[1].outcome.reason.length).toBeGreaterThan(0);
+      }
+
+      const seenIds = new Set(pages.flatMap((p) => p.documents.map((d) => d.sourceId)));
+      // Real, if incomplete, progress — the first call's items are captured even though the
+      // range as a whole cannot be fully drained under this configuration.
+      expect(seenIds.size).toBeGreaterThan(0);
+      expect(seenIds.size).toBeLessThan(total);
+    });
+
+    it('signals outcome "truncated" on a first backfill call whose entire capped fetch sits at the inclusive lower bound', async () => {
+      const rangeSince = new Date((NOW_SEC - 1000) * 1000);
+      const rangeUntil = new Date((NOW_SEC - 500) * 1000);
+      const sinceSec = Math.floor(rangeSince.getTime() / 1000);
+      // All four items land exactly on the range's own inclusive lower bound.
+      // collectWindow seeds `maxSeenSec`/`secondMaxSeenSec` at `sinceSec` itself, so an item
+      // AT that value takes neither the "new max" nor "new second-max" branch — the same
+      // stall shape as many items tied at one second, just reachable on literally the first
+      // call for a range (composer's fix-round-2 note) rather than only a later resumption.
+      const hits: FixtureHit[] = Array.from({ length: 4 }, (_, i) => ({
+        objectID: String(500 + i),
+        created_at_i: sinceSec,
+      }));
+      const firebaseItems = Object.fromEntries(hits.map((h) => [h.objectID, { ...firebaseComment, id: Number(h.objectID) }]));
+      const { adapter } = buildAdapter(
+        { hits, firebaseItems },
+        { nowMs: NOW_MS, hitsPerPage: 1, maxPagesPerQuery: 1 },
+      );
+
+      const first = await adapter.fetchBackfill({ since: rangeSince, until: rangeUntil }, undefined);
+
+      expect(first.documents.length).toBeGreaterThan(0); // still salvages what it fetched
+      expect(first.documents.length).toBeLessThan(hits.length); // did not walk every page
+      expect(first.cursor).toBeUndefined();
+      expect(first.outcome?.kind).toBe('truncated');
     });
 
     it('returns cursor undefined immediately when the resumption cursor has already reached the range end', async () => {
