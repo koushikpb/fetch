@@ -35,13 +35,23 @@ whose `PLAN.md` entry is missing is not done.
 
 ## Current state
 
-**Phase:** 0 — Foundation
-**Active tasks:** whole-branch review
-**Next up:** Phase 0 PR against `main`, then I-01
+**Phase:** 1 — Ingestion
+**Active tasks:** R-04, R-05 (wave 1 — both clear blockers)
+**Next up:** I-01, once the net contract is settled
 
-**Phase 0 is code-complete.** All six `SPEC.md` tasks plus two composer-created reconciliation
-tasks are `DONE` and merged into `phase/0-foundation`. `pnpm verify` is green: 214 tests across
-9 files, typecheck and lint clean.
+**Phase 0 shipped.** PR #1 merged to `main` on 2026-08-05 as `eced880` — six `SPEC.md` tasks
+plus three composer-created reconciliation tasks, 221 tests green.
+
+**Phase 1 wave plan.** More sequential than Phase 0 by nature: everything downstream depends on
+the `SourceAdapter` interface, so the three adapters are the one big parallel win.
+
+| Wave | Tasks | Why grouped |
+|---|---|---|
+| 1 | R-04, R-05 | Both clear blockers (B-06, B-05). Disjoint scopes, so concurrent |
+| 2 | I-01 | Designed against the contract R-04 settles |
+| 3 | I-02, I-04 | Two adapters, disjoint files. I-03 joins if scopes stay clean |
+| 4 | I-05 | Needs all adapters |
+| 5 | I-06 | Needs the orchestrator |
 **Rolling 30-day projected spend:** $0.00 (ceiling: $70.00)
 
 **Phase 0 dispatch order:** F-01 → F-06 → **(F-02 ∥ F-03)** → **(F-04 ∥ F-05)** → final
@@ -79,7 +89,9 @@ a time with `pnpm verify` re-run after each merge.
 
 | ID | Task | Status | Blockers | Assigned | Notes |
 |---|---|---|---|---|---|
-| I-01 | `SourceAdapter` interface and registry | TODO | F-04, F-06 | — | Interface quality determines cost of every future source |
+| R-04 | Settle `lib/net.ts` terminal-failure contract | WIP | F-04 | — | Composer-created; clears **B-06** before three adapters build on it |
+| R-05 | Make TypeScript entry points runnable | WIP | F-01 | — | Composer-created; clears **B-05**, authorizes `tsx`, adds `pnpm smoke` |
+| I-01 | `SourceAdapter` interface and registry | TODO | F-04, F-06, R-04 | — | Interface quality determines cost of every future source |
 | I-02 | Hacker News adapter | TODO | I-01 | — | Free and unmetered — develop against this one first |
 | I-03 | App Store reviews adapter | TODO | I-01 | — | |
 | I-04 | Reddit adapter | TODO | I-01 | — | 100 QPM hard limit |
@@ -176,6 +188,8 @@ don't relitigate them.*
 | 2026-08-04 | F-06 added as a blocker of F-03, F-04, F-05; dispatched second | F-06's criterion is repo-wide — "every thrown error in the repo is an instance of a class from `lib/errors.ts`". Config, net, and llm all throw. Building the taxonomy after them guarantees rework |
 | 2026-08-04 | Node 22 pinned via Homebrew `node@22`; no `use-node-version` in `.npmrc` | pnpm 11 imports `node:sqlite` and refuses to start on Node < 22.13, so the toolchain self-enforces the pin. A second version declaration would be a redundant source of truth |
 | 2026-08-04 | `O-04` in the F-01 spec text read as a typo for `O-03` | No task `O-04` exists anywhere; `O-03 — Cost projection in verify` is described in `PLAN.md` as replacing the F-01 stub |
+| 2026-08-05 | **B-06 resolved: `lib/net.ts` throws when it gave up, returns when the server answered definitively** | Exhausted 5xx now throws (new `UpstreamError`), joining exhausted 429; non-retryable 4xx still returns a `Response`. Derived from consumer needs, not tidiness: I-02 must read a 404 for a deleted Hacker News item without an exception, while I-05 needs a broken upstream to surface as a catchable error it can record as `PARTIAL`. Lifts the F-04-era constraint against adding a fourth error class |
+| 2026-08-05 | **`tsx` authorized as a devDependency** — second departure from the stack table | Nothing could run a TypeScript entry point (B-05), so `db/seed.ts` was tested but not invokable and I-05/I-06 had no way to exist. `tsx` is the smallest fix for the `.js`-specifier convention `tsconfig.json` already commits to; changing module resolution instead would touch every import in the repo |
 | 2026-08-04 | **`zod` authorized as a dependency** — first departure from the stack table | Runtime schema validation is needed in at least three places: F-03 config validation, and X-03/X-04 validating model JSON against the `PainPoint` schema ("malformed model output is quarantined"). Hand-rolling it three times is worse than one small ubiquitous dependency. No runtime cost impact. Composer decision under the `CLAUDE.md` rule that a dependency needs a task to authorize it |
 | 2026-08-04 | Repo-wide criteria are enforced by ESLint, not by inspection | F-06's "every thrown error is an `AppError`" and "no `catch {}`" are claims about the whole repo that no reviewer can verify by reading a diff. They are now lint rules with paired positive/negative tests, so later tasks inherit the guarantee mechanically |
 | 2026-08-04 | **Postgres 16 → 18** in the stack table and the F-02 criterion | User decision. Postgres 18.3 is already running locally via brew; pgvector 0.8.6 installed against it and enabled on `fetch_dev` and `fetch_test`. pgvector supports PG 13–18, so nothing in the design is lost, and reusing the running server keeps `pnpm verify` fast and Docker-free |
