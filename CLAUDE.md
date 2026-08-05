@@ -98,7 +98,8 @@ The only agent holding the whole project in view. It:
 2. Selects the next task whose blockers are all `DONE`. Never picks a blocked task.
 3. Writes a task brief containing: task ID, exact files in scope, completion criteria
    copied verbatim from `SPEC.md`, and any interface contracts to honor.
-4. Dispatches exactly one subagent per task.
+4. Dispatches exactly one subagent per task, running independent tasks concurrently — see
+   *Parallel dispatch* below.
 5. Reviews the returned diff against the completion criteria. Rejects and re-dispatches
    with corrective notes if criteria are unmet. Rejection is cheap; a merged half-task
    poisons every downstream task.
@@ -137,6 +138,29 @@ NOTES: <out-of-scope observations, follow-ups, surprises>
 
 `PARTIAL` is a legitimate outcome, preferred over silently expanding scope or faking a
 criterion. Report honestly; the composer decides what happens next.
+
+### Parallel dispatch
+
+Tasks whose blockers are all `DONE` run concurrently, one subagent each. Sequential
+dispatch is the exception, not the default — if two `READY` tasks do not contend, they go
+out together.
+
+Two tasks may run in parallel only when **their file scopes are disjoint**. File scope is
+declared in the task brief, so the composer can check this before dispatching; if it cannot,
+the brief is underspecified and the task is not ready.
+
+- Each parallel subagent works in **its own git worktree** on its own branch off the phase
+  branch. Two agents in one working tree will corrupt each other's state.
+- The composer merges completed branches back into the phase branch **one at a time**,
+  re-running `pnpm verify` after each merge. A merge that passes in isolation can still
+  break in combination; the verify after each merge is what catches it.
+- `package.json` and `pnpm-lock.yaml` are shared by every task that adds a dependency, so
+  concurrent dependency-adding tasks *will* conflict. Resolve `package.json` by hand and
+  regenerate the lockfile with `pnpm install` — never hand-merge a lockfile.
+- Shared config files (`eslint.config.js`, `tsconfig.json`) are contention points. Two tasks
+  that both amend one of them are not disjoint and must be sequenced.
+
+Reviews parallelize freely — they are read-only and never contend.
 
 ### Escalation
 
@@ -183,8 +207,15 @@ platform terms-of-service question. These are composer decisions.
 
 ### Git
 
-- One commit per task. Message: `<task-id>: <imperative summary>`.
-- Branch per phase: `phase/<n>-<slug>`.
+- One commit per task. Message: `<task-id>: <imperative summary>`. The commit is part of the
+  task — a task reported complete without one is not complete.
+- Branch per phase: `phase/<n>-<slug>`. Parallel tasks branch off it as
+  `task/<task-id>-<slug>` and merge back into it.
+- **One pull request per phase.** When every task in a phase is `DONE` and the final
+  whole-branch review is clean, the composer pushes the phase branch and opens a PR against
+  `main`. The PR body carries: the phase's task list with commit SHAs, the criteria met per
+  task, cumulative cost impact, and any deferred or parked findings the review triaged as
+  non-blocking. A phase is not finished until its PR is open.
 - No force pushes, no rewriting shared history.
 
 ### Verification

@@ -40,8 +40,18 @@ whose `PLAN.md` entry is missing is not done.
 **Next up:** F-03
 **Rolling 30-day projected spend:** $0.00 (ceiling: $70.00)
 
-**Phase 0 dispatch order:** F-01 → F-06 → F-03 → F-02 → F-04 → F-05. This differs from
-the `SPEC.md` blocker graph; see the decisions log entries dated 2026-08-04 for why.
+**Phase 0 dispatch order:** F-01 → F-06 → **(F-02 ∥ F-03)** → **(F-04 ∥ F-05)** → final
+review → PR. This differs from the `SPEC.md` blocker graph; see the decisions log entries
+dated 2026-08-04 for why.
+
+**Parallel waves.** Tasks in a wave have disjoint file scopes and run concurrently, each in
+its own worktree on a `task/<id>-<slug>` branch off `phase/0-foundation`, merged back one at
+a time with `pnpm verify` re-run after each merge.
+
+| Wave | Tasks | Known contention | Resolution |
+|---|---|---|---|
+| 1 | F-02, F-03 | `package.json`, `pnpm-lock.yaml` — both add dependencies | Hand-merge `package.json`, regenerate the lockfile with `pnpm install` |
+| 2 | F-04, F-05 | none expected — `lib/net.ts` and `lib/llm.ts`/`lib/budget.ts` are disjoint, and both ESLint overrides already exist | Sequence them if either turns out to need `eslint.config.js` |
 
 ---
 
@@ -157,6 +167,7 @@ don't relitigate them.*
 | 2026-08-04 | `O-04` in the F-01 spec text read as a typo for `O-03` | No task `O-04` exists anywhere; `O-03 — Cost projection in verify` is described in `PLAN.md` as replacing the F-01 stub |
 | 2026-08-04 | **`zod` authorized as a dependency** — first departure from the stack table | Runtime schema validation is needed in at least three places: F-03 config validation, and X-03/X-04 validating model JSON against the `PainPoint` schema ("malformed model output is quarantined"). Hand-rolling it three times is worse than one small ubiquitous dependency. No runtime cost impact. Composer decision under the `CLAUDE.md` rule that a dependency needs a task to authorize it |
 | 2026-08-04 | Repo-wide criteria are enforced by ESLint, not by inspection | F-06's "every thrown error is an `AppError`" and "no `catch {}`" are claims about the whole repo that no reviewer can verify by reading a diff. They are now lint rules with paired positive/negative tests, so later tasks inherit the guarantee mechanically |
+| 2026-08-04 | Parallel dispatch is the default; one PR per phase | User directive. `CLAUDE.md` §2 *Parallel dispatch* and §3 *Git* now carry the rules: tasks run concurrently when their declared file scopes are disjoint, each in its own worktree, merged back one at a time with `pnpm verify` after each merge. A phase is not finished until its PR against `main` is open |
 | 2026-08-04 | Built-in error *construction* banned, not just *throwing* | Banning only `throw new Error(...)` left `const e = new Error(); throw e;` as a bypass. Banning the `NewExpression` outside `lib/errors.ts` closes it syntactically, with no need for a custom type-aware rule. `tests/**` is exempt from the construction ban only, so tests can still synthesize a foreign error to prove `cause` wrapping |
 
 ---
