@@ -1,0 +1,68 @@
+[
+  {
+    "source": "appstore",
+    "source_id": "as-2001",
+    "url": "https://apps.apple.com/us/app/budgetly/id555000001?see-all=reviews",
+    "author_handle": "frustrated_freelancer",
+    "title": "Can't split a bill across two accounts",
+    "body": "I freelance and pay some expenses from my business account and some from personal. This app forces every transaction into one account with no way to split. I've emailed support twice with no reply.",
+    "created_at": "2025-01-11T10:15:00.000Z",
+    "engagement": { "rating": 2, "votes": 14 },
+    "raw": { "app_id": "555000001", "territory": "us", "rating": 2 }
+  },
+  {
+    "source": "appstore",
+    "source_id": "as-2002",
+    "url": "https://apps.apple.com/us/app/budgetly/id555000001?see-all=reviews",
+    "author_handle": "quietriver22",
+    "title": "Great for basic tracking",
+    "body": "Does exactly what it says for a single account. Simple and fast.",
+    "created_at": "2025-01-20T13:40:00.000Z",
+    "engagement": { "rating": 4, "votes": 3 },
+    "raw": { "app_id": "555000001", "territory": "us", "rating": 4 }
+  },
+  {
+    "source": "appstore",
+    "source_id": "as-2003",
+    "url": "https://apps.apple.com/us/app/routinecal/id555000002?see-all=reviews",
+    "author_handle": "shiftworker_dad",
+    "title": "No support for rotating shift schedules",
+    "body": "I work a 4-on-4-off rotation and every calendar app I've tried assumes a fixed weekly pattern. I have to manually re-enter my schedule every month because none of them support a repeating N-day cycle.",
+    "created_at": "2025-02-03T07:55:00.000Z",
+    "engagement": { "rating": 1, "votes": 61 },
+    "raw": { "app_id": "555000002", "territory": "us", "rating": 1 }
+  },
+  {
+    "source": "appstore",
+    "source_id": "as-2004",
+    "url": "https://apps.apple.com/gb/app/routinecal/id555000002?see-all=reviews",
+    "author_handle": "nurse_on_rota",
+    "title": "Same issue as everyone else with rotating shifts",
+    "body": "Adding my voice to the pile: fixed weekly patterns only. I switched to a paper calendar because it was less work than fighting this app every month.",
+    "created_at": "2025-02-10T19:22:00.000Z",
+    "engagement": { "rating": 1, "votes": 29 },
+    "raw": { "app_id": "555000002", "territory": "gb", "rating": 1 }
+  },
+  {
+    "source": "appstore",
+    "source_id": "as-2005",
+    "url": "https://apps.apple.com/us/app/docscanpro/id555000003?see-all=reviews",
+    "author_handle": "smallbizowner",
+    "title": "Loses formatting on multi-page scans",
+    "body": "Scanning a single receipt is fine. Anything over three pages and the export mangles page order about half the time. I now double-check every export before sending it to my accountant.",
+    "created_at": "2025-03-05T15:08:00.000Z",
+    "engagement": { "rating": 2, "votes": 9 },
+    "raw": { "app_id": "555000003", "territory": "us", "rating": 2 }
+  },
+  {
+    "source": "appstore",
+    "source_id": "as-2006",
+    "url": "https://apps.apple.com/us/app/docscanpro/id555000003?see-all=reviews",
+    "author_handle": "paperwork_hater",
+    "title": null,
+    "body": "Works well enough for what I need, exports look fine on my end.",
+    "created_at": "2025-03-22T12:30:00.000Z",
+    "engagement": { "rating": 5, "votes": 1 },
+    "raw": { "app_id": "555000003", "territory": "us", "rating": 5 }
+  }
+]

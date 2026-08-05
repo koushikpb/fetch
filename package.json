@@ -14,10 +14,13 @@
     "cost:project": "node scripts/cost-projection.ts",
     "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm cost:project",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "db:generate": "drizzle-kit generate"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "@types/pg": "^8.20.4",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.6",
@@ -26,6 +29,8 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0",
     "zod": "^4.4.3"
   }
 }

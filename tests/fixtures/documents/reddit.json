@@ -1,0 +1,79 @@
+[
+  {
+    "source": "reddit",
+    "source_id": "rd-3001",
+    "url": "https://www.reddit.com/r/personalfinance/comments/rd3001/anyone_found_a_tool_for_multibank_subscriptions",
+    "author_handle": "u/three_banks_no_luck",
+    "title": "Anyone found a tool that tracks subscriptions across multiple banks?",
+    "body": "I've tried Rocket Money, Bobby, and two others. All of them want you to link one primary account and treat everything else as an afterthought. I have accounts at three different banks and none of these give me one real picture.",
+    "created_at": "2025-01-09T22:10:00.000Z",
+    "engagement": { "score": 340, "num_comments": 112, "upvote_ratio": 0.94 },
+    "raw": { "subreddit": "personalfinance", "id": "rd3001" }
+  },
+  {
+    "source": "reddit",
+    "source_id": "rd-3002",
+    "url": "https://www.reddit.com/r/personalfinance/comments/rd3001/anyone_found_a_tool_for_multibank_subscriptions/comment1",
+    "author_handle": "u/spreadsheet_survivor",
+    "title": null,
+    "body": "Gave up and built my own spreadsheet with Plaid's API directly. Total waste of a weekend but at least it actually works across accounts now.",
+    "created_at": "2025-01-10T02:44:00.000Z",
+    "engagement": { "score": 89, "num_comments": 0 },
+    "raw": { "subreddit": "personalfinance", "id": "rd3002", "parent": "rd3001" }
+  },
+  {
+    "source": "reddit",
+    "source_id": "rd-3003",
+    "url": "https://www.reddit.com/r/sysadmin/comments/rd3003/oncall_tooling_for_tiny_teams",
+    "author_handle": "u/lonely_pager",
+    "title": "On-call tooling for tiny teams (2 people)?",
+    "body": "PagerDuty and Opsgenie both price by seat in a way that makes them absurd for a two-person team, and their free tiers strip out escalation policies entirely, which is the one feature we actually need.",
+    "created_at": "2025-02-15T09:30:00.000Z",
+    "engagement": { "score": 215, "num_comments": 76, "upvote_ratio": 0.91 },
+    "raw": { "subreddit": "sysadmin", "id": "rd3003" }
+  },
+  {
+    "source": "reddit",
+    "source_id": "rd-3004",
+    "url": "https://www.reddit.com/r/sysadmin/comments/rd3003/oncall_tooling_for_tiny_teams/comment1",
+    "author_handle": "u/opsgenie_refugee",
+    "title": null,
+    "body": "We just use a shared calendar and a phone tree. Embarrassing in 2025 but every tool in this space is built for orgs 10x our size.",
+    "created_at": "2025-02-15T11:02:00.000Z",
+    "engagement": { "score": 54, "num_comments": 0 },
+    "raw": { "subreddit": "sysadmin", "id": "rd3004", "parent": "rd3003" }
+  },
+  {
+    "source": "reddit",
+    "source_id": "rd-3005",
+    "url": "https://www.reddit.com/r/WorkOnline/comments/rd3005/rotating_shift_calendar_apps_that_actually_work",
+    "author_handle": "u/four_on_four_off",
+    "title": "Rotating shift calendar apps that actually support N-day cycles?",
+    "body": "I work 4-on-4-off. Every calendar app assumes a fixed 7-day week. I have re-entered my schedule by hand every single month for two years now.",
+    "created_at": "2025-02-11T06:18:00.000Z",
+    "engagement": { "score": 178, "num_comments": 63, "upvote_ratio": 0.96 },
+    "raw": { "subreddit": "WorkOnline", "id": "rd3005" }
+  },
+  {
+    "source": "reddit",
+    "source_id": "rd-3006",
+    "url": "https://www.reddit.com/r/devtools/comments/rd3006/schema_diffing_across_environments",
+    "author_handle": "u/migration_anxiety",
+    "title": "How do you diff Postgres schemas across staging and prod before a migration?",
+    "body": "Right now it's a manual pg_dump --schema-only and eyeballing the diff. Feels like something that should exist off the shelf but every tool I find is tied to a specific ORM.",
+    "created_at": "2025-02-20T13:55:00.000Z",
+    "engagement": { "score": 132, "num_comments": 41, "upvote_ratio": 0.89 },
+    "raw": { "subreddit": "devtools", "id": "rd3006" }
+  },
+  {
+    "source": "reddit",
+    "source_id": "rd-3007",
+    "url": "https://www.reddit.com/r/devtools/comments/rd3006/schema_diffing_across_environments/comment1",
+    "author_handle": "u/diff_tool_skeptic",
+    "title": null,
+    "body": "There's a couple of CLI tools for this but they all choke the moment you have partitioned tables. Ended up writing 40 lines of Python around information_schema instead.",
+    "created_at": "2025-02-20T15:10:00.000Z",
+    "engagement": { "score": 47, "num_comments": 0 },
+    "raw": { "subreddit": "devtools", "id": "rd3007", "parent": "rd3006" }
+  }
+]
