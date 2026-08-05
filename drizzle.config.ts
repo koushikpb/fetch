@@ -1,16 +1,22 @@
-// Build-time tooling config for `drizzle-kit generate`/`migrate` — not application code, so
-// this is the one authorized place in this task to read `process.env.DATABASE_URL`
-// directly (composer resolution F-02 #8; F-03's forthcoming `process.env` lint ban targets
-// runtime modules like db/index.ts, db/seed.ts, and db/migrate.ts, not this file).
+// Build-time tooling config for `drizzle-kit generate`/`migrate` — not application code, but
+// still bound by F-03's `process.env` ban (R-01 reconciliation): rather than carving an
+// exception, this goes through `bootConfig()` — the same boot-time entry point every other
+// process uses — so drizzle-kit gets the identical validated, fail-loudly-on-missing
+// DATABASE_URL as the rest of the app, instead of a silent fallback to a guessed dev URL.
+// `bootConfig()` (not `loadConfigFromEnv()`) is deliberate: it's the variant that prints a
+// clean one-line message and exits non-zero on a `ConfigError`, which is the right failure
+// mode for a CLI entry point — `loadConfigFromEnv()` would surface the same problem as a raw
+// thrown exception with a full stack trace.
 import { defineConfig } from 'drizzle-kit';
+import { bootConfig } from './lib/config.js';
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://nick@localhost:5432/fetch_dev';
+const { databaseUrl } = bootConfig();
 
 export default defineConfig({
   dialect: 'postgresql',
   schema: './db/schema.ts',
   out: './drizzle',
   dbCredentials: {
-    url: DATABASE_URL,
+    url: databaseUrl,
   },
 });
