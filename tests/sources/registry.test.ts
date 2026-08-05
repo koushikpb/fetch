@@ -50,8 +50,8 @@ describe('registry (the production export)', () => {
   // update. A `toContain` here would let a fourth source register silently, which is the one
   // thing this test exists to prevent.
   it('lists exactly the adapters that have landed', () => {
-    expect(new Set(registry.list())).toEqual(new Set(['appstore']));
-    expect(registry.list()).toHaveLength(1);
+    expect(new Set(registry.list())).toEqual(new Set(['appstore', 'hackernews']));
+    expect(registry.list()).toHaveLength(2);
   });
 
   it('conforms to the SourceRegistry shape (get, list)', () => {

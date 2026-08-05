@@ -16,6 +16,7 @@ import { AppError } from '../lib/errors.js';
 import type { Source } from '../lib/types.js';
 import type { SourceAdapter } from './types.js';
 import { createAppStoreAdapter } from './appstore/adapter.js';
+import { createHackerNewsAdapter } from './hackernews/adapter.js';
 
 export interface SourceRegistry {
   /**
@@ -74,4 +75,7 @@ export function createSourceRegistry(adapters: readonly SourceAdapter[]): Source
  * else in the repo should construct its own registry outside tests, which use
  * `createSourceRegistry` directly with fakes instead of mutating this shared instance.
  */
-export const registry: SourceRegistry = createSourceRegistry([createAppStoreAdapter()]);
+export const registry: SourceRegistry = createSourceRegistry([
+  createAppStoreAdapter(),
+  createHackerNewsAdapter(),
+]);
