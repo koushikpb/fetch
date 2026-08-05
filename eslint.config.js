@@ -29,6 +29,12 @@
 //  - F-06 criterion 2 ("no `catch {}` or bare rethrow-and-swallow"): `no-empty` with
 //    `allowEmptyCatch` left at its default `false` bans the empty case; `no-useless-catch`
 //    (above) bans the bare-rethrow case. Neither has an exemption anywhere.
+//  - F-03 criterion 2 ("no `process.env` access anywhere outside the config module"):
+//    `no-restricted-syntax` bans a `process.env` member expression everywhere except
+//    lib/config.ts, via the same redefine-the-rule idiom as the fetch/error bans above —
+//    every override that already redefines `no-restricted-syntax` for its file (NET_WRAPPER,
+//    ERRORS_MODULE, TESTS_GLOB) picks this ban back up explicitly rather than losing it by
+//    omission, since lib/config.ts is the only file that should ever be exempt from it.
 //
 // `only-throw-error` requires type information (`requiresTypeChecking: true` in its own
 // metadata), so this file turns on typed linting via `parserOptions.projectService`.
@@ -54,6 +60,7 @@ import prettierConfig from 'eslint-config-prettier';
 const NET_WRAPPER = 'lib/net.ts';
 const LLM_WRAPPER = 'lib/llm.ts';
 const ERRORS_MODULE = 'lib/errors.ts';
+const CONFIG_MODULE = 'lib/config.ts';
 const TESTS_GLOB = 'tests/**';
 
 const BUILTIN_ERROR_CTORS =
@@ -77,6 +84,25 @@ const CONSTRUCT_BUILTIN_ERROR_BAN = {
 const EXTENDS_BUILTIN_ERROR_BAN = {
   selector: `:matches(ClassDeclaration, ClassExpression)[superClass.name=${BUILTIN_ERROR_CTORS}]`,
   message: `Custom error classes must extend AppError (${ERRORS_MODULE}), not a built-in error constructor directly — a bare "extends Error" bypasses the lib/errors.ts taxonomy.`,
+};
+
+// Matches `process.env` itself and any deeper access through it (`process.env.FOO`, since
+// that is a MemberExpression whose `object` is the `process.env` MemberExpression this
+// selector already matches). The dot-notation clause alone missed bracket-notation access
+// to the same property — `process["env"]` is a MemberExpression whose `property` is a
+// `Literal` node, so it has `property.value` ('env'), not `property.name` (that's only set
+// on `Identifier` nodes) — fix round 1, Finding 2 (reviewer verified `process["env"].FOO`
+// and `process["env"]["FOO"]` produced zero lint messages against the dot-only selector).
+// The second clause below closes that gap the same way the dot clause covers
+// `process.env.FOO`: matching the inner `process["env"]` sub-expression, regardless of how
+// it's chained afterward.
+const PROCESS_ENV_BAN = {
+  selector:
+    ':matches(' +
+    "MemberExpression[object.name='process'][property.name='env'], " +
+    "MemberExpression[object.name='process'][computed=true][property.value='env']" +
+    ')',
+  message: `Reading process.env directly is forbidden outside ${CONFIG_MODULE} — call loadConfigFromEnv() or bootConfig() instead (SPEC F-03 criterion 2).`,
 };
 
 export default tseslint.config(
@@ -108,6 +134,7 @@ export default tseslint.config(
         FETCH_BAN,
         CONSTRUCT_BUILTIN_ERROR_BAN,
         EXTENDS_BUILTIN_ERROR_BAN,
+        PROCESS_ENV_BAN,
       ],
       'no-restricted-imports': [
         'error',
@@ -124,11 +151,18 @@ export default tseslint.config(
   },
   {
     // lib/net.ts legitimately calls bare fetch (it *is* the wrapper), but it must still
-    // throw only AppError subclasses and must not grow its own ad hoc Error subclass — so
-    // this redefines the rule with FETCH_BAN dropped rather than turning it off wholesale.
+    // throw only AppError subclasses, must not grow its own ad hoc Error subclass, and must
+    // still get its settings (timeouts, rate limits) from the Config object rather than
+    // reading process.env itself — so this redefines the rule with only FETCH_BAN dropped
+    // rather than turning it off wholesale.
     files: [NET_WRAPPER],
     rules: {
-      'no-restricted-syntax': ['error', CONSTRUCT_BUILTIN_ERROR_BAN, EXTENDS_BUILTIN_ERROR_BAN],
+      'no-restricted-syntax': [
+        'error',
+        CONSTRUCT_BUILTIN_ERROR_BAN,
+        EXTENDS_BUILTIN_ERROR_BAN,
+        PROCESS_ENV_BAN,
+      ],
     },
   },
   {
@@ -138,26 +172,43 @@ export default tseslint.config(
   {
     // AppError itself must extend the built-in Error, and the taxonomy module is the one
     // place constructing a bare `new Error(...)` (for `AppError`'s own `super()` call, in
-    // effect) is legitimate — so this redefines the rule with only FETCH_BAN kept, mirroring
-    // the NET_WRAPPER override above rather than turning the whole rule off. Turning it off
-    // entirely (fix round 1's bug) silently also dropped FETCH_BAN, regressing F-01
-    // criterion 4 for this file.
+    // effect) is legitimate — so this redefines the rule with FETCH_BAN and PROCESS_ENV_BAN
+    // kept, mirroring the NET_WRAPPER override above rather than turning the whole rule off.
+    // Turning it off entirely (fix round 1's bug) silently also dropped FETCH_BAN, regressing
+    // F-01 criterion 4 for this file — the same mistake would silently exempt this file from
+    // PROCESS_ENV_BAN too if the rule were ever switched off instead of redefined.
     files: [ERRORS_MODULE],
     rules: {
-      'no-restricted-syntax': ['error', FETCH_BAN],
+      'no-restricted-syntax': ['error', FETCH_BAN, PROCESS_ENV_BAN],
+    },
+  },
+  {
+    // lib/config.ts is the sole module SPEC F-03 criterion 2 allows to read process.env —
+    // this drops PROCESS_ENV_BAN only, the same redefine-not-disable idiom as every override
+    // above, so the file stays bound by the fetch ban and the error-taxonomy bans.
+    files: [CONFIG_MODULE],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        FETCH_BAN,
+        CONSTRUCT_BUILTIN_ERROR_BAN,
+        EXTENDS_BUILTIN_ERROR_BAN,
+      ],
     },
   },
   {
     // Composer decision (F-06 fix round 1): tests legitimately need to construct a foreign
     // plain `Error` to prove AppError's `cause` option preserves it (tests/errors.test.ts) —
     // that is a real, intentional exercise of the taxonomy's escape hatch, not a bypass of
-    // it. Only CONSTRUCT_BUILTIN_ERROR_BAN is dropped; FETCH_BAN and EXTENDS_BUILTIN_ERROR_BAN
-    // still apply, and this file has no bearing on `no-useless-catch` (a separate rule,
-    // enabled unconditionally above) — the bare-rethrow ban has no exemption anywhere,
-    // tests included.
+    // it. Only CONSTRUCT_BUILTIN_ERROR_BAN is dropped; FETCH_BAN, EXTENDS_BUILTIN_ERROR_BAN,
+    // and PROCESS_ENV_BAN still apply (tests build a Config from a literal object per F-03
+    // resolution 2, or stub process.env via vitest's `vi.stubEnv`, never by writing
+    // `process.env` in source), and this file has no bearing on `no-useless-catch` (a
+    // separate rule, enabled unconditionally above) — the bare-rethrow ban has no exemption
+    // anywhere, tests included.
     files: [TESTS_GLOB],
     rules: {
-      'no-restricted-syntax': ['error', FETCH_BAN, EXTENDS_BUILTIN_ERROR_BAN],
+      'no-restricted-syntax': ['error', FETCH_BAN, EXTENDS_BUILTIN_ERROR_BAN, PROCESS_ENV_BAN],
     },
   },
   prettierConfig,

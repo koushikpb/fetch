@@ -87,6 +87,91 @@ describe('eslint prohibitions (F-01 criterion 4)', () => {
   });
 });
 
+describe('eslint prohibitions (F-03 criterion 2: no process.env access outside lib/config.ts)', () => {
+  it('reports process.env access outside lib/config.ts', async () => {
+    const messages = await lintMessages(
+      'export function f(): string | undefined {\n  return process.env.DATABASE_URL;\n}\n',
+      'sources/example.ts',
+    );
+    expect(
+      messages.some(
+        (m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/config.ts'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not report process.env access inside lib/config.ts', async () => {
+    const ruleIds = await lint(
+      'export function f(): string | undefined {\n  return process.env.DATABASE_URL;\n}\n',
+      'lib/config.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+
+  // Guards against the exact F-06 fix-round-1 regression class documented above (Finding 1
+  // there): an override that turns the whole rule off for its file, rather than redefining
+  // it, silently drops every other ban that rule was carrying for that file too.
+  it('still reports bare fetch(...) inside lib/config.ts — the process.env exemption is scoped, not a blanket rule-off', async () => {
+    const messages = await lintMessages(
+      'export async function load(): Promise<Response> {\n  return fetch("https://example.com");\n}\n',
+      'lib/config.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/net.ts')),
+    ).toBe(true);
+  });
+
+  it('still reports process.env access inside tests/** — no exemption there either', async () => {
+    const messages = await lintMessages(
+      'export function f(): string | undefined {\n  return process.env.DATABASE_URL;\n}\n',
+      'tests/config.test.ts',
+    );
+    expect(
+      messages.some(
+        (m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/config.ts'),
+      ),
+    ).toBe(true);
+  });
+
+  // Fix round 1, Finding 2: the dot-notation selector clause alone
+  // (`property.name='env'`) only matches `Identifier` property nodes, so bracket access
+  // with a string literal — `process["env"]` — slipped through with zero lint messages
+  // (reviewer-verified against the live config before this fix). The added
+  // `[computed=true][property.value='env']` clause targets that Literal-property shape
+  // specifically.
+  it('reports bracket-notation process["env"].FOO access outside lib/config.ts', async () => {
+    const messages = await lintMessages(
+      'export function f(): string | undefined {\n  return process["env"].DATABASE_URL;\n}\n',
+      'sources/example.ts',
+    );
+    expect(
+      messages.some(
+        (m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/config.ts'),
+      ),
+    ).toBe(true);
+  });
+
+  it('reports fully bracketed process["env"]["FOO"] access outside lib/config.ts', async () => {
+    const messages = await lintMessages(
+      'export function f(): string | undefined {\n  return process["env"]["DATABASE_URL"];\n}\n',
+      'sources/example.ts',
+    );
+    expect(
+      messages.some(
+        (m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/config.ts'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not report bracket-notation process["env"] access inside lib/config.ts', async () => {
+    const ruleIds = await lint(
+      'export function f(): string | undefined {\n  return process["env"].DATABASE_URL;\n}\n',
+      'lib/config.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+});
+
 // A single shared fake path for the "should fire in an ordinary file" cases below,
 // reused across many `lintText` calls rather than one fake path per case. typescript-eslint's
 // project service caps how many distinct paths may fall back to the default project within
