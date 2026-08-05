@@ -62,10 +62,11 @@ a time with `pnpm verify` re-run after each merge.
 | ID | Task | Status | Blockers | Assigned | Notes |
 |---|---|---|---|---|---|
 | F-01 | Repo scaffold and tooling | DONE | — | — | `e5814f1` |
-| F-02 | Database schema and migrations | READY | F-01 | — | Dispatch 4th — F-05 needs `runs` |
-| F-03 | Config and secrets | READY | F-01, F-06 | — | Dispatch 3rd |
-| F-04 | `lib/net.ts` | TODO | F-01, F-03, F-06 | — | Gates all of Phase 1 |
-| F-05 | `lib/llm.ts` + `lib/budget.ts` | TODO | F-01, F-02, F-03, F-06 | — | Gates all of Phase 2 |
+| F-02 | Database schema and migrations | DONE | F-01 | — | `97b3834` (1 fix round) |
+| F-03 | Config and secrets | DONE | F-01, F-06 | — | `201080d` (1 fix round) |
+| R-01 | Reconcile `drizzle.config.ts` with the `process.env` ban | WIP | F-02, F-03 | — | Composer-created; merge fallout, not a `SPEC.md` task |
+| F-04 | `lib/net.ts` | WIP | F-01, F-03, F-06 | — | Gates all of Phase 1 |
+| F-05 | `lib/llm.ts` + `lib/budget.ts` | READY | F-01, F-02, F-03, F-06 | — | Gates all of Phase 2 |
 | F-06 | Error taxonomy and logging | DONE | F-01 | — | `e76b023` (1 fix round) |
 
 ### Phase 1 — Ingestion
@@ -144,6 +145,7 @@ condition, the task it blocks, and what would resolve it.*
 | B-02 | C-01 | No hand-labeled cluster set | Hand-cluster ~100 extracted pain points |
 | B-03 | C-04 | No labeled saturated-market examples | Identify ≥5 clusters with known mature solutions for negative testing |
 | B-04 | X-01, X-02 | **No embedding provider is named anywhere in the spec or stack table, and Anthropic does not offer an embeddings API.** The whole cost thesis rests on the embedding prefilter, so this is a load-bearing gap, not a detail | Choose a provider and model, add it to the stack table, and price it at 50k documents/month against the $70 ceiling. F-02 pins the vector column at `1536` as a placeholder; a different model means a forward migration |
+| B-05 | I-05, I-06 | **Nothing can run a TypeScript entry point.** F-02 had to delete its `db:migrate` and `db:seed` scripts: bare `node <file>.ts` cannot resolve this repo's `.js`-import-specifier-to-`.ts`-file convention outside vitest's transform. The seed script is tested but not operationally invokable | A small task adding a runner (`tsx`, or `node --experimental-strip-types` with matching resolution settings), or a change to F-01's module resolution. Needed before any scheduled or CLI-invoked pipeline stage exists |
 
 These three are human-input blockers, not agent-solvable. They gate the phases where
 quality actually matters, so front-load them — start labeling during Phase 0 or 1 rather
@@ -188,6 +190,42 @@ don't relitigate them.*
 ```
 
 ---
+
+### 2026-08-05 — F-02 DONE
+**Summary:** Drizzle schema for all eight tables, pgvector enabled, four forward-only
+migrations, and a deterministic 20-document seed across all three sources.
+**Files:** db/schema.ts, db/index.ts, db/seed.ts, db/migrate.ts, drizzle.config.ts,
+drizzle/0000–0003 + meta, tests/db/*.test.ts, tests/fixtures/documents/*, package.json,
+pnpm-workspace.yaml
+**Criteria:** all five MET after one fix round (82 tests). Every criterion is proven by a
+structural query against a live database — `information_schema` for the `timestamptz` rule, a
+recursive FK/array walk with a negative control for traceability — not by trusting the schema
+file. The reviewer independently reproduced all of it on its own scratch databases.
+**Cost impact:** none.
+**Follow-ups:** The review found `TRUNCATE documents CASCADE` silently bypassing the
+append-only trigger — Postgres fires triggers on `TRUNCATE` only when declared
+`BEFORE TRUNCATE ... FOR EACH STATEMENT`. Closed by migration `0003`. Composer signed off on
+schema columns beyond the bare table list: they are named verbatim in F-05's and X-03's
+criteria, and forward-only migrations make including them now cheaper than three later ones.
+Deferred minor: `drizzle.config.ts`'s hardcoded `DATABASE_URL` fallback masks a missing env
+var rather than failing fast. New blocker B-05 registered.
+
+### 2026-08-05 — F-03 DONE
+**Summary:** Typed config loader with zod schema validation, aggregate fail-fast reporting,
+and secret redaction that survives every serialization route.
+**Files:** lib/config.ts, .env.example, eslint.config.js, tests/config.test.ts,
+tests/eslint-rules.test.ts, package.json
+**Criteria:** all three MET after one fix round (104 tests).
+**Cost impact:** none.
+**Follow-ups:** The review found a Critical the implementer's own tests missed: secrets were
+ordinary enumerable own properties, so `{...config}`, `Object.entries`, `Object.keys`, and
+`structuredClone` all leaked them verbatim. The reviewer reproduced the real exploit —
+`log.info('booted', {...config})` printing `ANTHROPIC_API_KEY` to stdout, because the logger
+spreads its fields. Fixed by making the four secret fields non-enumerable and non-writable.
+Also closed a `process["env"].FOO` bracket-notation bypass in the lint ban. Worth recording
+that the first fix attempt (private `#` fields plus getters) crashed Vitest's `toEqual`:
+Vitest clones instances without running the constructor, so the private-field slot is never
+initialized.
 
 ### 2026-08-04 — F-06 DONE
 **Summary:** `AppError` taxonomy, structured single-line JSON logger, `AsyncLocalStorage`
