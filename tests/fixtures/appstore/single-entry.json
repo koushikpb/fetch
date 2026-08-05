@@ -1,0 +1,116 @@
+{
+  "feed": {
+    "author": {
+      "name": {
+        "label": "iTunes Store"
+      },
+      "uri": {
+        "label": "http://www.apple.com/uk/itunes/"
+      }
+    },
+    "entry": {
+      "author": {
+        "uri": {
+          "label": "https://itunes.apple.com/gb/reviews/id25704485"
+        },
+        "name": {
+          "label": "Lollisko"
+        },
+        "label": ""
+      },
+      "updated": {
+        "label": "2026-07-09T04:05:43-07:00"
+      },
+      "im:rating": {
+        "label": "1"
+      },
+      "im:version": {
+        "label": "1.0.7"
+      },
+      "id": {
+        "label": "14281590861"
+      },
+      "title": {
+        "label": "False advertising"
+      },
+      "content": {
+        "label": "The advert for this app is false",
+        "attributes": {
+          "type": "text"
+        }
+      },
+      "link": {
+        "attributes": {
+          "rel": "related",
+          "href": "https://itunes.apple.com/gb/review?id=6740220635&type=Purple%20Software"
+        }
+      },
+      "im:voteSum": {
+        "label": "0"
+      },
+      "im:contentType": {
+        "attributes": {
+          "term": "Application",
+          "label": "Application"
+        }
+      },
+      "im:voteCount": {
+        "label": "0"
+      }
+    },
+    "updated": {
+      "label": "2026-08-05T03:28:19-07:00"
+    },
+    "rights": {
+      "label": "Copyright 2008 Apple Inc."
+    },
+    "title": {
+      "label": "iTunes Store: Customer Reviews"
+    },
+    "icon": {
+      "label": "http://itunes.apple.com/favicon.ico"
+    },
+    "link": [
+      {
+        "attributes": {
+          "rel": "alternate",
+          "type": "text/html",
+          "href": "https://music.apple.com/WebObjects/MZStore.woa/wa/viewGrouping?cc=gb&id=130"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "self",
+          "href": "https://itunes.apple.com/gb/rss/customerreviews/id=6740220635/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "first",
+          "href": "https://itunes.apple.com/gb/rss/customerreviews/page=1/id=6740220635/sortby=mostrecent/xml?urlDesc=/customerreviews/id=6740220635/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "last",
+          "href": "https://itunes.apple.com/gb/rss/customerreviews/page=1/id=6740220635/sortby=mostrecent/xml?urlDesc=/customerreviews/id=6740220635/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "previous",
+          "href": "https://itunes.apple.com/gb/rss/customerreviews/page=1/id=6740220635/sortby=mostrecent/xml?urlDesc=/customerreviews/id=6740220635/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "next",
+          "href": "https://itunes.apple.com/gb/rss/customerreviews/page=2/id=6740220635/sortby=mostrecent/xml?urlDesc=/customerreviews/id=6740220635/sortby=mostrecent/json"
+        }
+      }
+    ],
+    "id": {
+      "label": "https://itunes.apple.com/gb/rss/customerreviews/id=6740220635/sortby=mostrecent/json"
+    }
+  }
+}
