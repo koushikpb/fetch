@@ -5,6 +5,7 @@ export type { IngestWorker, IngestWorkerOptions } from './worker.js';
 export {
   applyIngestSchedules,
   INGEST_DEAD_LETTER_QUEUE,
+  INGEST_TICK_QUEUE,
   ingestQueueName,
   provisionIngestQueues,
 } from './queues.js';

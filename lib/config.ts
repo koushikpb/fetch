@@ -142,11 +142,31 @@ const DEFAULT_SCHEDULE_TIMEZONE = 'UTC';
 const DEFAULT_RETRY_LIMIT = 3;
 const DEFAULT_RETRY_DELAY_SECONDS = 60;
 /**
- * Caps the backoff below the shortest default cadence, so a retry chain for one source
- * cannot still be waiting when that source's next scheduled tick arrives.
+ * Caps the backoff at the shortest default cadence (`*​/15` is 900 seconds exactly), so a
+ * retry chain for one source cannot be scheduled further out than that source's next
+ * ordinary tick — at which point the retry has stopped being a recovery and has become a
+ * duplicate of work that was about to happen anyway.
  */
 const DEFAULT_RETRY_DELAY_MAX_SECONDS = 900;
 const DEFAULT_JOB_EXPIRY_SECONDS = 3600;
+
+/**
+ * pg-boss asserts `expireInSeconds / 3600 < 24` (attorney.js `MAX_EXPIRATION_HOURS`), and
+ * violating it throws from `createQueue` during worker boot. Bounded here so the failure is
+ * a config error naming the variable rather than an assertion out of a dependency — the
+ * previous `.env.example` invited exactly this by saying "raise it" and documenting no
+ * ceiling.
+ */
+const MAX_JOB_EXPIRY_SECONDS = 86_399;
+/**
+ * The floor exists because expiry is not a passive timeout: pg-boss races the handler
+ * against it *in process* and fails the job when it wins, while the original handler keeps
+ * running. A value shorter than a realistic run therefore does not abort anything, it
+ * multiplies it — measured at `retryLimit + 1` concurrent runs of one source. 60 seconds is
+ * comfortably longer than any observed run and leaves the pathological end of the range
+ * unreachable. It does not make overrun impossible; see `.env.example`.
+ */
+const MIN_JOB_EXPIRY_SECONDS = 60;
 
 /**
  * Deliberately shallow: it checks the field *count* and rejects characters no cron field can
@@ -361,6 +381,7 @@ function checkInteger(
   name: string,
   raw: string | undefined,
   minimum: number,
+  maximum?: number,
 ): void {
   if (raw === undefined || raw === '') {
     return;
@@ -368,6 +389,10 @@ function checkInteger(
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < minimum) {
     ctx.addIssue(`${name} must be an integer of at least ${String(minimum)}`);
+    return;
+  }
+  if (maximum !== undefined && parsed > maximum) {
+    ctx.addIssue(`${name} must be an integer no greater than ${String(maximum)}`);
   }
 }
 
@@ -468,7 +493,13 @@ const EnvSchema = z
     checkInteger(ctx, 'INGEST_RETRY_LIMIT', data.INGEST_RETRY_LIMIT, 0);
     checkInteger(ctx, 'INGEST_RETRY_DELAY_SECONDS', data.INGEST_RETRY_DELAY_SECONDS, 1);
     checkInteger(ctx, 'INGEST_RETRY_DELAY_MAX_SECONDS', data.INGEST_RETRY_DELAY_MAX_SECONDS, 1);
-    checkInteger(ctx, 'INGEST_JOB_EXPIRY_SECONDS', data.INGEST_JOB_EXPIRY_SECONDS, 1);
+    checkInteger(
+      ctx,
+      'INGEST_JOB_EXPIRY_SECONDS',
+      data.INGEST_JOB_EXPIRY_SECONDS,
+      MIN_JOB_EXPIRY_SECONDS,
+      MAX_JOB_EXPIRY_SECONDS,
+    );
 
     // Caught here rather than left to pg-boss, which clamps each delay to the maximum and so
     // turns an inverted pair into a fixed-delay retry policy that silently is not backoff.

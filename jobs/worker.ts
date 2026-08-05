@@ -7,11 +7,12 @@
 import { PgBoss } from 'pg-boss';
 import type { Config } from '../lib/config.js';
 import { log } from '../lib/log.js';
-import { SOURCES } from '../lib/types.js';
+import { SOURCES, type Source } from '../lib/types.js';
 import { runIngestJob } from './ingest-job.js';
 import {
   applyIngestSchedules,
   INGEST_DEAD_LETTER_QUEUE,
+  INGEST_TICK_QUEUE,
   ingestQueueName,
   provisionIngestQueues,
 } from './queues.js';
@@ -77,9 +78,78 @@ export async function startIngestWorker(options: IngestWorkerOptions): Promise<I
     log.warn('pg-boss raised a warning', { warning: warning.message, data: warning.data });
   });
 
-  await boss.start();
-  await provisionIngestQueues(boss, config.scheduler);
-  await applyIngestSchedules(boss, config.scheduler);
+  // Everything after `start()` runs against a pg-boss that owns a connection pool and a set
+  // of interval timers. Letting a failure escape from here without stopping it leaves those
+  // holding the event loop open: the process logs the reason, never exits, and stops being a
+  // worker without ever appearing to have stopped. Two inputs `.env.example` actively invites
+  // reach this path — a five-field cron pg-boss still rejects, and an expiry it asserts on —
+  // so it is an ordinary boot failure, not a remote one.
+  try {
+    await boss.start();
+    await provisionIngestQueues(boss, config.scheduler);
+    await applyIngestSchedules(boss, config.scheduler);
+    await registerWorkers(boss, context, pollingIntervalSeconds);
+  } catch (err) {
+    await boss.stop({ close: true, graceful: false, timeout: 1000 });
+    throw err;
+  }
+
+  log.info('ingest worker started', {
+    tickQueue: INGEST_TICK_QUEUE,
+    queues: SOURCES.map(ingestQueueName),
+    deadLetterQueue: INGEST_DEAD_LETTER_QUEUE,
+  });
+
+  return {
+    boss,
+    stop: async () => {
+      await boss.stop({ close: true, graceful: true, timeout: STOP_GRACE_MS });
+    },
+  };
+}
+
+function isSource(value: unknown): value is Source {
+  return typeof value === 'string' && (SOURCES as readonly string[]).includes(value);
+}
+
+async function registerWorkers(
+  boss: PgBoss,
+  context: IngestJobContext,
+  pollingIntervalSeconds: number,
+): Promise<void> {
+  // Forwards each cron tick onto its source's own queue, which is where the lock lives. The
+  // point of doing it here rather than scheduling straight onto the source queue is the
+  // `null` below: pg-boss's own scheduler discards a policy refusal, so without this a source
+  // whose runs overrun its cadence just quietly ran less often than it was configured to.
+  await boss.work<IngestJobData>(
+    INGEST_TICK_QUEUE,
+    { batchSize: 1, pollingIntervalSeconds },
+    async (jobs) => {
+      for (const job of jobs) {
+        const source = job.data.source;
+        if (!isSource(source)) {
+          log.error('ingest tick carried an unrecognized source; nothing was run', {
+            received: source,
+            tick_job_id: job.id,
+          });
+          continue;
+        }
+        const queue = ingestQueueName(source);
+        const jobId = await boss.send(queue, { source } satisfies IngestJobData);
+        if (jobId === null) {
+          log.warn('scheduled ingest tick dropped: a run of this source is already pending', {
+            source,
+            queue,
+            tick_job_id: job.id,
+            effect:
+              'this cadence interval is skipped; no evidence is lost because the next run resumes from the same cursor',
+          });
+          continue;
+        }
+        log.info('scheduled ingest tick dispatched', { source, queue, job_id: jobId });
+      }
+    },
+  );
 
   for (const source of SOURCES) {
     // The source comes from the queue being worked, not from the job payload: the queue is
@@ -92,7 +162,23 @@ export async function startIngestWorker(options: IngestWorkerOptions): Promise<I
         const results: IngestJobResult[] = [];
         for (const job of jobs) {
           log.info('scheduled ingest job started', { source, job_id: job.id });
-          results.push(await runIngestJob(source, context));
+          const result = await runIngestJob(source, context);
+          // pg-boss races the handler against `expireInSeconds` in this process and aborts
+          // this signal when the deadline wins. It cannot stop the run — the orchestrator has
+          // no cancellation seam — so by here the job has already been failed and requeued
+          // while this run kept going, and a concurrent run of the same source is possible.
+          // Nothing else reports that: the queue looks healthy and the retry looks ordinary.
+          if (job.signal.aborted) {
+            log.error('scheduled ingest run outlived its expiry; a concurrent run is possible', {
+              source,
+              job_id: job.id,
+              run_id: result.runId,
+              expireInSeconds: job.expireInSeconds,
+              effect:
+                'pg-boss has already requeued this job; raise INGEST_JOB_EXPIRY_SECONDS above this run duration',
+            });
+          }
+          results.push(result);
         }
         return results;
       },
@@ -125,16 +211,4 @@ export async function startIngestWorker(options: IngestWorkerOptions): Promise<I
       }
     },
   );
-
-  log.info('ingest worker started', {
-    queues: SOURCES.map(ingestQueueName),
-    deadLetterQueue: INGEST_DEAD_LETTER_QUEUE,
-  });
-
-  return {
-    boss,
-    stop: async () => {
-      await boss.stop({ close: true, graceful: true, timeout: STOP_GRACE_MS });
-    },
-  };
 }

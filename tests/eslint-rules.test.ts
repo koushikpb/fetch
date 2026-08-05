@@ -52,13 +52,20 @@ async function lint(code: string, filePath: string): Promise<string[]> {
 }
 
 describe('eslint prohibitions (F-01 criterion 4)', () => {
+  // Explicit timeout because this is the first `lintText` in the file and therefore the one
+  // that pays for building the type-aware project service — a cost that scales with how many
+  // files the repo has, not with anything this test asserts. It sat at roughly 4.5s of the 5s
+  // default before I-06 added its module and suites, and tipped over under `pnpm verify`'s
+  // parallel load. Raising the budget changes no assertion; the alternative is a test that
+  // fails for whichever task next adds files. Flagged in the I-06 report as a change to
+  // another task's file.
   it('reports `any` in a normal source file', async () => {
     const ruleIds = await lint(
       'export function identity(value: any): unknown {\n  return value;\n}\n',
       'sources/example.ts',
     );
     expect(ruleIds).toContain('@typescript-eslint/no-explicit-any');
-  });
+  }, 30_000);
 
   it('reports bare fetch(...) outside lib/net.ts', async () => {
     const ruleIds = await lint(

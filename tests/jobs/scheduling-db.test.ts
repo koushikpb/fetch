@@ -19,12 +19,15 @@ import {
 import {
   applyIngestSchedules,
   INGEST_DEAD_LETTER_QUEUE,
+  INGEST_TICK_QUEUE,
   ingestQueueName,
   provisionIngestQueues,
   startIngestWorker,
+  type IngestJobContext,
   type IngestWorker,
 } from '../../jobs/index.js';
 import { loadConfig, type Config } from '../../lib/config.js';
+import type { Source } from '../../lib/types.js';
 import { RateLimitError } from '../../lib/errors.js';
 import { createRegistry, createSourceRegistry } from '../../sources/registry.js';
 import {
@@ -41,6 +44,11 @@ import {
 } from './fakes.js';
 
 const HN_QUEUE = ingestQueueName('hackernews');
+
+/** The schedule registered for one source, or undefined when that source is switched off. */
+async function scheduleFor(boss: PgBoss, source: Source) {
+  return (await boss.getSchedules(INGEST_TICK_QUEUE)).find((entry) => entry.key === source);
+}
 
 /** Every schedule off: these suites send jobs themselves and must not race a cron tick. */
 function configFor(connectionString: string, overrides: Record<string, string> = {}): Config {
@@ -164,22 +172,24 @@ describe('queue provisioning and schedules', () => {
         INGEST_SCHEDULE_APPSTORE: '17 * * * *',
       }).scheduler,
     );
-    expect(await boss.getSchedules(HN_QUEUE)).toMatchObject([{ cron: '*/15 * * * *' }]);
-    expect(await boss.getSchedules(ingestQueueName('appstore'))).toMatchObject([
-      { cron: '17 * * * *' },
-    ]);
+    // Schedules live on the tick queue, one per source, distinguished by `key` — the source
+    // queues themselves are never scheduled directly, so that a refused forward is loggable.
+    expect(await scheduleFor(boss, 'hackernews')).toMatchObject({ cron: '*/15 * * * *' });
+    expect(await scheduleFor(boss, 'appstore')).toMatchObject({ cron: '17 * * * *' });
     // reddit stayed 'off' in this config, so it must not have been scheduled at all.
-    expect(await boss.getSchedules(ingestQueueName('reddit'))).toEqual([]);
+    expect(await scheduleFor(boss, 'reddit')).toBeUndefined();
+    // Nothing may remain pointed straight at a source queue: it would double-run the source.
+    expect(await boss.getSchedules(HN_QUEUE)).toEqual([]);
 
     // A restart with a changed setting: one schedule, the new expression — not two.
     await applyIngestSchedules(
       boss,
       configFor(scratch.connectionString, { INGEST_SCHEDULE_HACKERNEWS: '*/3 * * * *' }).scheduler,
     );
-    const after = await boss.getSchedules(HN_QUEUE);
-    expect(after).toHaveLength(1);
-    expect(after[0]?.cron).toBe('*/3 * * * *');
-    expect(after[0]?.timezone).toBe('UTC');
+    const all = await boss.getSchedules(INGEST_TICK_QUEUE);
+    expect(all.filter((entry) => entry.key === 'hackernews')).toHaveLength(1);
+    expect((await scheduleFor(boss, 'hackernews'))?.cron).toBe('*/3 * * * *');
+    expect((await scheduleFor(boss, 'hackernews'))?.timezone).toBe('UTC');
   });
 
   it('removes a schedule when its source is switched off', async () => {
@@ -190,10 +200,40 @@ describe('queue provisioning and schedules', () => {
       boss,
       configFor(scratch.connectionString, { INGEST_SCHEDULE_HACKERNEWS: '*/9 * * * *' }).scheduler,
     );
-    expect(await boss.getSchedules(HN_QUEUE)).toHaveLength(1);
+    expect(await scheduleFor(boss, 'hackernews')).toBeDefined();
 
     await applyIngestSchedules(boss, configFor(scratch.connectionString).scheduler);
-    expect(await boss.getSchedules(HN_QUEUE)).toEqual([]);
+    expect(await scheduleFor(boss, 'hackernews')).toBeUndefined();
+  });
+
+  it('leaves every schedule untouched when one expression is rejected', async () => {
+    // `61 * * * *` has five legal fields, so lib/config.ts accepts it by design and only
+    // pg-boss rejects it — mid-loop. Without all-or-nothing application, the sources already
+    // reached would be left on the new cadence and the rest silently on the old one.
+    await applyIngestSchedules(
+      boss,
+      configFor(scratch.connectionString, {
+        INGEST_SCHEDULE_HACKERNEWS: '*/11 * * * *',
+        INGEST_SCHEDULE_APPSTORE: '19 * * * *',
+        INGEST_SCHEDULE_REDDIT: '39 * * * *',
+      }).scheduler,
+    );
+
+    await expect(
+      applyIngestSchedules(
+        boss,
+        configFor(scratch.connectionString, {
+          INGEST_SCHEDULE_HACKERNEWS: '*/2 * * * *',
+          INGEST_SCHEDULE_APPSTORE: '19 * * * *',
+          INGEST_SCHEDULE_REDDIT: '61 * * * *',
+        }).scheduler,
+      ),
+    ).rejects.toThrow();
+
+    // hackernews is applied before reddit, so a non-transactional apply would have moved it.
+    expect((await scheduleFor(boss, 'hackernews'))?.cron).toBe('*/11 * * * *');
+    expect((await scheduleFor(boss, 'appstore'))?.cron).toBe('19 * * * *');
+    expect((await scheduleFor(boss, 'reddit'))?.cron).toBe('39 * * * *');
   });
 
   it('honours a non-UTC timezone from configuration', async () => {
@@ -204,9 +244,10 @@ describe('queue provisioning and schedules', () => {
         INGEST_SCHEDULE_TIMEZONE: 'Europe/London',
       }).scheduler,
     );
-    expect(await boss.getSchedules(ingestQueueName('appstore'))).toMatchObject([
-      { cron: '0 4 * * *', timezone: 'Europe/London' },
-    ]);
+    expect(await scheduleFor(boss, 'appstore')).toMatchObject({
+      cron: '0 4 * * *',
+      timezone: 'Europe/London',
+    });
   });
 });
 
@@ -288,8 +329,19 @@ describe('overlapping runs of one source are prevented by the job-level lock', (
   }, 30_000);
 
   it('lets the next run proceed once the first has finished', async () => {
-    const next = await worker.boss.send(HN_QUEUE, { source: 'hackernews' });
-    expect(next).not.toBeNull();
+    // Polled rather than sent once: the handler returning is not the same instant as pg-boss
+    // settling the job, so a single send here races the completion round-trip and is refused
+    // for the correct reason — the lock is still held. What this asserts is that the refusal
+    // is temporary, which is the half the previous test cannot show.
+    let accepted: string | null = null;
+    const deadline = Date.now() + 20_000;
+    while (accepted === null && Date.now() < deadline) {
+      accepted = await worker.boss.send(HN_QUEUE, { source: 'hackernews' });
+      if (accepted === null) {
+        await sleep(100);
+      }
+    }
+    expect(accepted).not.toBeNull();
     await waitFor('the second run to start', () => started === 2);
     expect(maxInFlight).toBe(1);
   }, 30_000);
@@ -345,11 +397,16 @@ describe('a failed job retries with backoff and gives up after the configured co
     // retryLimit 3 means the first attempt plus three retries, and then no more.
     expect(attempts).toBe(4);
     expect(delaysSeconds).toHaveLength(3);
-    for (let i = 1; i < delaysSeconds.length; i += 1) {
-      expect(delaysSeconds[i]).toBeGreaterThan(delaysSeconds[i - 1] ?? 0);
+    // Compared against a growth factor rather than against the previous element. pg-boss
+    // jitters each delay within `[base * 2^n / 2, base * 2^n]`, so consecutive attempts can
+    // legitimately land ~1ms apart at the boundary — an assertion that only requires "greater
+    // than the last one" passes against a genuine fixed-delay policy on roughly half of runs.
+    // Requiring each delay to exceed 1.5x the base separates backoff from no backoff outright.
+    for (const delay of delaysSeconds) {
+      expect(delay).toBeGreaterThanOrEqual(4);
     }
-    // Not merely increasing — increasing from the configured starting delay.
-    expect(delaysSeconds[0]).toBeGreaterThanOrEqual(4);
+    expect(delaysSeconds[1]).toBeGreaterThan(4 * 1.5);
+    expect(delaysSeconds[2]).toBeGreaterThan(4 * 1.5 * 1.5);
 
     const dead = await boss.findJobs(INGEST_DEAD_LETTER_QUEUE, {});
     expect(dead).toHaveLength(1);
@@ -524,5 +581,232 @@ describe('a source that is configured off', () => {
     ).bySource;
     expect(bySource?.reddit?.status).toBe('skipped');
     expect(bySource?.reddit?.detail).toContain('No Reddit credentials configured');
+  }, 60_000);
+});
+
+describe('a boot that cannot complete', () => {
+  let scratch: ScratchDatabase;
+
+  beforeAll(async () => {
+    scratch = await setupScratchDatabase('jobs_boot');
+  }, 60_000);
+
+  afterAll(async () => {
+    await teardownScratchDatabase(scratch);
+  });
+
+  function contextFor(): IngestJobContext {
+    return {
+      registry: createSourceRegistry([createFakeAdapter({ source: 'hackernews' })]),
+      documents: createMemoryDocumentSink(),
+      cursors: createMemoryCursorStore(),
+      runs: createMemoryRunRecorder(),
+    };
+  }
+
+  // `boss.start()` opens a pool and a set of interval timers. A failure after it that does not
+  // stop pg-boss leaves those holding the event loop open, so the process logs the reason and
+  // then runs forever without working anything — healthy to a supervisor, ingesting nothing.
+  // Both inputs below are ones lib/config.ts accepts by design and pg-boss rejects.
+  it('rejects a five-field cron that pg-boss will not accept, and stops pg-boss on the way out', async () => {
+    const config = configFor(scratch.connectionString, {
+      INGEST_SCHEDULE_HACKERNEWS: '61 * * * *',
+    });
+    expect(await backendCount(scratch)).toBe(0);
+
+    await expect(startIngestWorker({ config, context: contextFor() })).rejects.toThrow();
+
+    // The throw is the easy half. This is the half that matters: a pg-boss left running holds
+    // its connection pool and its interval timers, which keeps the event loop alive, so the
+    // process logs the reason and then never exits — a worker that looks healthy to a
+    // supervisor and ingests nothing. Counting backends is what distinguishes "reported the
+    // error" from "reported the error and let go".
+    expect(await backendCount(scratch)).toBe(0);
+  }, 60_000);
+
+  it('rejects an expiry pg-boss asserts on, at config boot rather than inside the dependency', () => {
+    // 86400 is exactly the ceiling pg-boss refuses; the previous build accepted any integer
+    // >= 1 here and only found out during createQueue.
+    expect(() =>
+      configFor(scratch.connectionString, { INGEST_JOB_EXPIRY_SECONDS: '86400' }),
+    ).toThrow(/INGEST_JOB_EXPIRY_SECONDS must be an integer no greater than 86399/);
+    expect(() => configFor(scratch.connectionString, { INGEST_JOB_EXPIRY_SECONDS: '1' })).toThrow(
+      /INGEST_JOB_EXPIRY_SECONDS must be an integer of at least 60/,
+    );
+  });
+
+  it('refuses to boot when a source queue exists under a policy that is not the lock', async () => {
+    // Policy is fixed at creation and `updateQueue` refuses to carry it, so this is the one
+    // setting re-provisioning cannot repair. Booting anyway would mean a worker whose
+    // per-source lock silently is not a lock.
+    //
+    // Its own database: the drifted queue has to pre-date any successful provisioning, and
+    // `createQueue` is a no-op against a queue that already exists — which is the whole reason
+    // this check has to read the policy back rather than trust the create.
+    const drifted = await setupScratchDatabase('jobs_policy');
+    try {
+      const boss = new PgBoss({ connectionString: drifted.connectionString, schedule: false });
+      await boss.start();
+      await boss.createQueue(ingestQueueName('appstore'), { policy: 'standard' });
+      await stopBoss(boss);
+
+      await expect(
+        startIngestWorker({ config: configFor(drifted.connectionString), context: contextFor() }),
+      ).rejects.toMatchObject({ code: 'INGEST_QUEUE_POLICY_DRIFT' });
+    } finally {
+      await teardownScratchDatabase(drifted);
+    }
+  }, 90_000);
+});
+
+/**
+ * How many backends are connected to the scratch database. Counted from the admin connection,
+ * which is attached to a different database, so nothing here contributes to its own reading.
+ */
+async function backendCount(scratch: ScratchDatabase): Promise<number> {
+  const { rows } = await scratch.admin.query<{ n: number }>(
+    'select count(*)::int as n from pg_stat_activity where datname = $1',
+    [scratch.databaseName],
+  );
+  return rows[0]?.n ?? 0;
+}
+
+describe('a worker killed mid-run', () => {
+  let scratch: ScratchDatabase;
+  let boss: PgBoss;
+
+  beforeAll(async () => {
+    scratch = await setupScratchDatabase('jobs_orphan');
+    // Both intervals shortened so the suite observes in seconds what production does in about
+    // two minutes: reclaim latency is heartbeatSeconds plus the supervisor's monitor interval.
+    boss = new PgBoss({
+      connectionString: scratch.connectionString,
+      schedule: false,
+      superviseIntervalSeconds: 5,
+      monitorIntervalSeconds: 5,
+      queueCacheIntervalSeconds: 5,
+    });
+    await boss.start();
+  }, 60_000);
+
+  afterAll(async () => {
+    await stopBoss(boss);
+    await teardownScratchDatabase(scratch);
+  });
+
+  it('has its orphaned job reclaimed instead of locking the source out until expiry', async () => {
+    // `kill -9` mid-run leaves the job `active` with nobody to settle it. Under the exclusive
+    // policy that locked the source out completely — every later send refused, nothing logged
+    // — until `expireInSeconds`, an hour by default. `heartbeatSeconds` is what bounds it: the
+    // worker refreshes the heartbeat while a handler runs, so a dead worker's stops.
+    await provisionIngestQueues(boss, configFor(scratch.connectionString).scheduler);
+    const queue = ingestQueueName('hackernews');
+
+    // The production queues really do carry a heartbeat — without this the reclaim below
+    // would be proving something about a queue this code does not actually create.
+    expect((await boss.getQueue(queue))?.heartbeatSeconds).toBe(60);
+    // Shortened for the behavioural half only. Reclaim latency is heartbeatSeconds plus the
+    // supervisor's monitor interval, so at the production value this test would idle for over
+    // a minute to observe a mechanism that does not depend on the constant. The 60-second
+    // value itself is asserted above, and exercised end to end by the live kill -9 in the
+    // report.
+    await boss.updateQueue(queue, { heartbeatSeconds: 10 });
+
+    await boss.send(queue, { source: 'hackernews' });
+    const [orphan] = await boss.fetch(queue);
+    expect(orphan).toBeDefined();
+    // The lockout is real while the orphan is held: this is the state the old build stayed in.
+    expect(await boss.send(queue, { source: 'hackernews' })).toBeNull();
+
+    const deadline = Date.now() + 45_000;
+    let state: string | undefined;
+    while (Date.now() < deadline) {
+      state = (await boss.findJobs(queue, { id: orphan?.id ?? '' }))[0]?.state;
+      if (state !== 'active') {
+        break;
+      }
+      await sleep(250);
+    }
+    // Back to `retry`, which means a live worker will pick it up and the source runs again.
+    expect(state).toBe('retry');
+  }, 90_000);
+
+  it('leaves the orphan stuck when no heartbeat is configured — the behaviour being fixed', async () => {
+    // The control. Same orphaning, same wait, no heartbeat: still `active`, still locked out.
+    // Without this the test above would pass just as well against a queue pg-boss happened to
+    // reclaim for some other reason.
+    await boss.createQueue('ingest.no-heartbeat', { policy: 'exclusive', expireInSeconds: 3600 });
+    await boss.send('ingest.no-heartbeat', { source: 'hackernews' });
+    const [orphan] = await boss.fetch('ingest.no-heartbeat');
+
+    await sleep(20_000);
+
+    const state = (await boss.findJobs('ingest.no-heartbeat', { id: orphan?.id ?? '' }))[0]?.state;
+    expect(state).toBe('active');
+    expect(await boss.send('ingest.no-heartbeat', {})).toBeNull();
+  }, 90_000);
+});
+
+describe('a tick that arrives while the source is already busy', () => {
+  let scratch: ScratchDatabase;
+  let worker: IngestWorker;
+  let capture: ReturnType<typeof captureLog>;
+  const released = deferred();
+  let started = 0;
+
+  beforeAll(async () => {
+    scratch = await setupScratchDatabase('jobs_tick');
+    const adapter = createFakeAdapter({
+      source: 'hackernews',
+      fetchIncremental: async () => {
+        started += 1;
+        await released.promise;
+        return { documents: [], cursor: undefined };
+      },
+    });
+    worker = await startIngestWorker({
+      config: configFor(scratch.connectionString),
+      context: {
+        registry: createSourceRegistry([adapter]),
+        documents: createMemoryDocumentSink(),
+        cursors: createMemoryCursorStore(),
+        runs: createMemoryRunRecorder(),
+      },
+      pollingIntervalSeconds: 0.5,
+    });
+  }, 60_000);
+
+  afterAll(async () => {
+    capture.restore();
+    released.resolve();
+    await stopBoss(worker.boss);
+    await teardownScratchDatabase(scratch);
+  });
+
+  it('is dropped and says so, rather than vanishing', async () => {
+    // pg-boss's own scheduler forwards ticks with `manager.send` and re-emits only *rejected*
+    // sends; an exclusive-policy refusal resolves to `null`, so scheduling straight onto the
+    // source queue made a dropped tick produce no line at any level. Ticks are routed through
+    // a queue this code owns precisely so the `null` has somewhere to be reported.
+    capture = captureLog();
+    await worker.boss.send(INGEST_TICK_QUEUE, { source: 'hackernews' });
+    await waitFor('the first run to be in flight', () => started === 1);
+
+    await worker.boss.send(INGEST_TICK_QUEUE, { source: 'hackernews' });
+    await waitFor('the dropped tick to be logged', () =>
+      parseLogLines(capture.lines()).some(
+        (record) =>
+          record.msg === 'scheduled ingest tick dropped: a run of this source is already pending',
+      ),
+    );
+
+    const dropped = parseLogLines(capture.lines()).find(
+      (record) =>
+        record.msg === 'scheduled ingest tick dropped: a run of this source is already pending',
+    );
+    expect(dropped?.level).toBe('warn');
+    expect(dropped?.source).toBe('hackernews');
+    // Dropped, not queued: the second tick never became a second run.
+    expect(started).toBe(1);
   }, 60_000);
 });

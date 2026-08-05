@@ -134,7 +134,7 @@ describe('scheduler configuration', () => {
       'INGEST_RETRY_DELAY_SECONDS must be an integer of at least 1',
     );
     expect(messageFor({ INGEST_JOB_EXPIRY_SECONDS: '0' })).toContain(
-      'INGEST_JOB_EXPIRY_SECONDS must be an integer of at least 1',
+      'INGEST_JOB_EXPIRY_SECONDS must be an integer of at least 60',
     );
   });
 
@@ -147,6 +147,21 @@ describe('scheduler configuration', () => {
       load({ INGEST_RETRY_DELAY_SECONDS: '30', INGEST_RETRY_DELAY_MAX_SECONDS: '30' }).scheduler
         .retryDelayMaxSeconds,
     ).toBe(30);
+  });
+
+  it('bounds the job expiry at both ends', () => {
+    // Upper: pg-boss asserts `expireInSeconds / 3600 < 24` and throws from createQueue during
+    // worker boot, which the previous build only discovered from inside the dependency.
+    expect(messageFor({ INGEST_JOB_EXPIRY_SECONDS: '86400' })).toContain(
+      'INGEST_JOB_EXPIRY_SECONDS must be an integer no greater than 86399',
+    );
+    expect(load({ INGEST_JOB_EXPIRY_SECONDS: '86399' }).scheduler.jobExpirySeconds).toBe(86399);
+    // Lower: expiry is raced against the handler in-process and cannot stop it, so a value
+    // below a realistic run duration multiplies the run rather than aborting it.
+    expect(messageFor({ INGEST_JOB_EXPIRY_SECONDS: '30' })).toContain(
+      'INGEST_JOB_EXPIRY_SECONDS must be an integer of at least 60',
+    );
+    expect(load({ INGEST_JOB_EXPIRY_SECONDS: '60' }).scheduler.jobExpirySeconds).toBe(60);
   });
 
   it('reports every scheduling problem in one boot, not one per restart', () => {
