@@ -10,7 +10,7 @@
 // suite assert an exact computed delay sequence without waiting on the real clock for
 // exponential backoff, which would otherwise make the suite slow and occasionally flaky
 // under load.
-import { NetworkError, RateLimitError, TimeoutError } from './errors.js';
+import { NetworkError, RateLimitError, TimeoutError, UpstreamError } from './errors.js';
 import { log } from './log.js';
 
 export interface RateLimitConfig {
@@ -283,16 +283,25 @@ async function performRequest(
     });
 
     if (!isRetryableStatus(status) || attempt >= client.retry.maxAttempts) {
-      // A 429 that's still failing once retries are exhausted is a genuine rate-limit
-      // condition worth its own typed error so a caller can react distinctly (e.g. pause
-      // ingestion for that source). A 5xx that survives retries has no equivalently precise
-      // class in lib/errors.ts's fixed taxonomy (composer resolution: use the three
-      // existing classes, don't add one) and is returned as an ordinary response instead —
-      // it's a valid HTTP exchange, just one the caller is left to interpret, the same way
-      // a non-retryable 4xx like 404 is (I-02 needs to read a 404-shaped response for a
-      // deleted HN item without net.ts throwing for it).
+      // The rule (composer resolution, task-R-04-brief.md): this module throws when it
+      // gave up, and returns a Response when the server gave a definitive answer. A 429 or
+      // 5xx that survives every retry means this module gave up, not that the server
+      // answered definitively, so both become typed, catchable errors — the same way
+      // NetworkError and TimeoutError already are — rather than a Response every caller
+      // must remember to inspect for a bad status. I-05's orchestrator depends on this: a
+      // broken upstream has to surface as something catchable so a failing source can be
+      // recorded as PARTIAL instead of silently reading as a successful exchange.
+      //
+      // A non-retryable 4xx is the opposite case: it *is* the server's definitive answer,
+      // just one the caller must interpret (I-02 needs a deleted HN item's 404 to read as
+      // an ordinary response, not a thrown exception), so 4xx keeps returning a Response.
       if (status === 429) {
         throw new RateLimitError(`Rate limited by ${hostname} after ${attempt} attempts`, {
+          context: { host: hostname, path: parsedUrl.pathname, attempt, status },
+        });
+      }
+      if (status >= 500 && status <= 599) {
+        throw new UpstreamError(`${hostname} returned ${status} after ${attempt} attempts`, {
           context: { host: hostname, path: parsedUrl.pathname, attempt, status },
         });
       }

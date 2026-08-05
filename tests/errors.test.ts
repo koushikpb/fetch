@@ -6,6 +6,7 @@ import {
   NetworkError,
   RateLimitError,
   TimeoutError,
+  UpstreamError,
 } from '../lib/errors.js';
 
 const SUBCLASSES = [
@@ -13,6 +14,7 @@ const SUBCLASSES = [
   { Ctor: NetworkError, name: 'NetworkError', code: 'NETWORK_ERROR' },
   { Ctor: TimeoutError, name: 'TimeoutError', code: 'TIMEOUT_ERROR' },
   { Ctor: RateLimitError, name: 'RateLimitError', code: 'RATE_LIMIT_ERROR' },
+  { Ctor: UpstreamError, name: 'UpstreamError', code: 'UPSTREAM_ERROR' },
   { Ctor: BudgetExceededError, name: 'BudgetExceededError', code: 'BUDGET_EXCEEDED' },
 ] as const;
 
