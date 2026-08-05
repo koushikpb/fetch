@@ -86,6 +86,7 @@ const NET_WRAPPER = 'lib/net.ts';
 const LLM_WRAPPER = 'lib/llm.ts';
 const ERRORS_MODULE = 'lib/errors.ts';
 const CONFIG_MODULE = 'lib/config.ts';
+const REGISTRY_MODULE = 'sources/registry.ts';
 const TESTS_GLOB = 'tests/**';
 
 const ALLOW_DEFAULT_PROJECT_CANDIDATES = [
@@ -142,6 +143,23 @@ const PROCESS_ENV_BAN = {
   message: `Reading process.env directly is forbidden outside ${CONFIG_MODULE} — call loadConfigFromEnv() or bootConfig() instead (SPEC F-03 criterion 2).`,
 };
 
+// SPEC I-01 criterion 3 / composer resolution 4: adapters are never imported directly by
+// ingest (or any other) code — only sources/registry.ts may reach into a platform adapter's
+// internals. `no-restricted-imports`'s `group` option (gitignore-style globs) only matches
+// what a relative specifier literally spells out, which varies with the importing file's
+// own depth (`./hackernews/x.js` from a sources/ sibling vs `../../sources/hackernews/x.js`
+// from ingest/) — there is no fixed set of glob shapes that covers every caller location.
+// `regex` instead matches the specifier text directly regardless of the importer's path,
+// the same location-independent approach FETCH_BAN and PROCESS_ENV_BAN above already take
+// for their own bans. The pattern requires a `/` or string boundary on both sides of the
+// directory name so it matches only that path *segment* — `./hackernews/adapter.js` and a
+// bare `./hackernews` (no trailing file) both match, but a same-named file that merely
+// starts with one of these words (`./hackernews-utils.js`) does not.
+const ADAPTER_DEEP_IMPORT_BAN = {
+  regex: '(^|/)(hackernews|appstore|reddit)(/|$)',
+  message: `Importing a platform adapter's internals directly is forbidden outside ${REGISTRY_MODULE} — obtain an adapter through the registry instead (SPEC I-01 criterion 3).`,
+};
+
 export default tseslint.config(
   { ignores: ['node_modules/**', 'dist/**', '.next/**', 'coverage/**'] },
   ...tseslint.configs.recommended,
@@ -176,6 +194,7 @@ export default tseslint.config(
               message: `Import the Anthropic SDK only in ${LLM_WRAPPER} — all model calls route through it (CLAUDE.md conventions).`,
             },
           ],
+          patterns: [ADAPTER_DEEP_IMPORT_BAN],
         },
       ],
     },
@@ -224,6 +243,27 @@ export default tseslint.config(
         FETCH_BAN,
         CONSTRUCT_BUILTIN_ERROR_BAN,
         EXTENDS_BUILTIN_ERROR_BAN,
+      ],
+    },
+  },
+  {
+    // sources/registry.ts is the sole permitted door into a platform adapter's internals
+    // (SPEC I-01 criterion 3; composer resolution 4) — this drops ADAPTER_DEEP_IMPORT_BAN
+    // only, the same redefine-not-disable idiom as every override above, so the file stays
+    // bound by the @anthropic-ai/sdk ban (and every no-restricted-syntax ban above,
+    // untouched by this block since it doesn't mention that rule at all).
+    files: [REGISTRY_MODULE],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@anthropic-ai/sdk',
+              message: `Import the Anthropic SDK only in ${LLM_WRAPPER} — all model calls route through it (CLAUDE.md conventions).`,
+            },
+          ],
+        },
       ],
     },
   },

@@ -376,6 +376,86 @@ describe('eslint prohibitions (F-06 criterion 2, part 2: no bare rethrow-and-swa
   });
 });
 
+describe('eslint prohibitions (I-01 criterion 3: adapters are only reachable through the registry)', () => {
+  it('reports importing sources/hackernews/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews/adapter.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  it('reports importing sources/appstore/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "import { x } from './appstore/adapter.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  it('reports importing sources/reddit/* outside the registry', async () => {
+    const ruleIds = await lint(
+      "import { x } from './reddit/adapter.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // The ban is location-independent (a regex over the specifier text, not a set of glob
+  // shapes tied to the importer's own depth) — this proves it fires from a file nowhere
+  // near sources/ too, using an existing real on-disk path so no new allowDefaultProject
+  // entry is needed (lintText's `code` argument overrides whatever is really there).
+  it('reports a deep adapter import from a file outside sources/ entirely', async () => {
+    const ruleIds = await lint(
+      "import { x } from '../sources/reddit/adapter.js';\nexport const y = x;\n",
+      'tests/errors.test.ts',
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // Exercises the `(/|$)` end-of-string branch specifically, not just the `/` branch every
+  // case above already covers — a bare directory import with no trailing file segment.
+  it('reports a bare directory import with no trailing file (./hackernews, no extension)', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+
+  // Boundary check: a same-named file that merely starts with one of the banned words must
+  // not false-positive — the regex requires a `/` or string boundary on both sides, so this
+  // proves it discriminates a directory *segment* from a filename that happens to start the
+  // same way (mirrors this file's PROCESS_ENV_BAN bracket-notation boundary tests above).
+  it('does not false-positive on a same-named file that is not the adapter directory', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews-utils.js';\nexport const y = x;\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).not.toContain('no-restricted-imports');
+  });
+
+  it('does not report a deep adapter import inside sources/registry.ts', async () => {
+    const ruleIds = await lint(
+      "import { x } from './hackernews/adapter.js';\nexport const y = x;\n",
+      'sources/registry.ts',
+    );
+    expect(ruleIds).not.toContain('no-restricted-imports');
+  });
+
+  // Fix-round-1-style regression guard (see the F-06/F-03 overrides above): the
+  // sources/registry.ts exemption redefines `no-restricted-imports` with only
+  // ADAPTER_DEEP_IMPORT_BAN dropped, not the whole rule turned off — this proves the
+  // @anthropic-ai/sdk ban still applies there.
+  it('still reports an @anthropic-ai/sdk import inside sources/registry.ts — the exemption is deep-adapter-import-only', async () => {
+    const ruleIds = await lint(
+      "import Anthropic from '@anthropic-ai/sdk';\nexport const client = new Anthropic();\n",
+      'sources/registry.ts',
+    );
+    expect(ruleIds).toContain('no-restricted-imports');
+  });
+});
+
 // Regression test for R-02: eslint.config.js's `allowDefaultProject` used to be a fixed
 // array that never changed, so it silently drifted out of sync the moment a listed path
 // became a real file — F-04's lib/net.ts and F-05's lib/llm.ts both did this, and
