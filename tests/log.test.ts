@@ -80,12 +80,46 @@ describe('structured logger', () => {
     expect(record.run_id).toBe('run-async');
   });
 
-  it('a caller-supplied field cannot shadow the real run_id', () => {
+  it('a caller-supplied field cannot shadow the real run_id when inside a run', () => {
     withRun('real-run-id', () => {
       log.info('trying to spoof run_id', { run_id: 'spoofed' });
     });
     const record = JSON.parse(capture.lines()[0] ?? '') as Record<string, unknown>;
     expect(record.run_id).toBe('real-run-id');
+  });
+
+  // Fix round 1 (Finding 2): the shadow-protection above only proved the *inside-a-run*
+  // case, because the reserved-key assignment for run_id was conditional
+  // (`if (runId !== undefined) record.run_id = runId`) — outside a run, a spoofed
+  // `run_id` field from the spread was never cleared. This is the case that regressed:
+  // a caller-supplied run_id must be dropped, not passed through, when there is no
+  // active run.
+  it('a caller-supplied run_id field is dropped (not passed through) when outside a run', () => {
+    log.info('trying to spoof run_id with none active', { run_id: 'spoofed-value' });
+    const record = JSON.parse(capture.lines()[0] ?? '') as Record<string, unknown>;
+    expect('run_id' in record).toBe(false);
+  });
+
+  // The other three reserved keys were already unconditionally overwritten after the
+  // spread (`record.ts = ...`, `record.level = level`, `record.msg = msg`), so these were
+  // never vulnerable to the same leak — added per fix round 1 to cover them the same way
+  // run_id is now covered, rather than leaving them asserted only by code inspection.
+  it('a caller-supplied field cannot shadow the real ts', () => {
+    log.info('trying to spoof ts', { ts: 'not-a-real-timestamp' });
+    const record = JSON.parse(capture.lines()[0] ?? '') as { ts: string };
+    expect(record.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it('a caller-supplied field cannot shadow the real level', () => {
+    log.warn('trying to spoof level', { level: 'spoofed-level' });
+    const record = JSON.parse(capture.lines()[0] ?? '') as { level: string };
+    expect(record.level).toBe('warn');
+  });
+
+  it('a caller-supplied field cannot shadow the real msg', () => {
+    log.info('the real message', { msg: 'spoofed-msg' });
+    const record = JSON.parse(capture.lines()[0] ?? '') as { msg: string };
+    expect(record.msg).toBe('the real message');
   });
 
   it('stays single-line when msg contains an embedded newline', () => {

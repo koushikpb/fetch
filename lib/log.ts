@@ -39,12 +39,18 @@ function write(level: LogLevel, msg: string, fields: LogFields = {}): void {
   }
   // Reserved keys are assigned after spreading `fields` so a field named e.g. `run_id` or
   // `level` can never shadow the real value — the log record's own integrity outranks
-  // whatever a caller passes in.
+  // whatever a caller passes in. `run_id` needs the explicit `delete` in the `else`
+  // branch (not just "don't set it") because a caller-supplied `run_id` field would
+  // already be sitting in `record` from the spread above; merely skipping the assignment
+  // when there's no active run would leave that spoofed value in place instead of
+  // enforcing "run_id appears only when inside a run" (brief resolution 5).
   record.ts = new Date().toISOString();
   record.level = level;
   record.msg = msg;
   const runId = getRunId();
-  if (runId !== undefined) {
+  if (runId === undefined) {
+    delete record.run_id;
+  } else {
     record.run_id = runId;
   }
   // JSON.stringify escapes embedded newlines as `\n` (two characters) rather than emitting

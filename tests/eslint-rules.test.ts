@@ -1,14 +1,20 @@
 // Proves F-01 criterion 4 and F-06 criteria 1-2 mechanically rather than by config
 // inspection: every prohibition below (`any`, bare `fetch`, direct `@anthropic-ai/sdk`
-// imports, throwing a built-in error constructor, declaring a class that extends the
-// built-in Error, throwing a non-Error value, an empty catch block) must actually surface
-// as a lint error, and every wrapper-module override (lib/net.ts, lib/llm.ts,
-// lib/errors.ts) must actually suppress the ones it's meant to. `lintText` with a virtual
-// `filePath` is sufficient — ESLint's flat-config `files` globs match against that path
-// without the file needing to exist on disk, and eslint.config.js's `allowDefaultProject`
-// glob is what lets typed rules (`@typescript-eslint/only-throw-error`) resolve type
-// information for a path that isn't part of the real tsconfig project. This does not
-// require creating lib/net.ts or lib/llm.ts (out of scope: F-04, F-05).
+// imports, constructing a built-in error type, declaring a class that extends the
+// built-in Error, throwing a non-Error value, an empty catch block, a bare rethrow) must
+// actually surface as a lint error, and every wrapper/exemption (lib/net.ts, lib/llm.ts,
+// lib/errors.ts, tests/**) must actually suppress only what it's meant to and nothing
+// more — fix round 1 found that lib/errors.ts's override had been suppressing the fetch
+// ban too, which a config-shape read would not have caught but a real `lintText` assertion
+// did. `lintText` with a virtual `filePath` is sufficient — ESLint's flat-config `files`
+// globs match against that path without the file needing to exist on disk, and
+// eslint.config.js's `allowDefaultProject` glob is what lets typed rules
+// (`@typescript-eslint/only-throw-error`) resolve type information for a path that isn't
+// part of the real tsconfig project. This does not require creating lib/net.ts or
+// lib/llm.ts (out of scope: F-04, F-05); the lib/errors.ts and tests/errors.test.ts
+// override tests below use those files' real, on-disk paths instead (with `lintText`
+// overriding their content), which needs no `allowDefaultProject` entry at all since
+// real files already resolve via the actual tsconfig project.
 import { ESLint } from 'eslint';
 import { describe, expect, it } from 'vitest';
 import { AppError } from '../lib/errors.js';
@@ -93,7 +99,7 @@ describe('eslint prohibitions (F-01 criterion 4)', () => {
 const ORDINARY_FILE = 'sources/example.ts';
 
 describe('eslint prohibitions (F-06 criterion 1: every thrown error is an AppError)', () => {
-  it('reports throwing a built-in Error constructor', async () => {
+  it('reports constructing a built-in Error, thrown inline', async () => {
     const messages = await lintMessages(
       "export function f(): void {\n  throw new Error('boom');\n}\n",
       ORDINARY_FILE,
@@ -103,7 +109,7 @@ describe('eslint prohibitions (F-06 criterion 1: every thrown error is an AppErr
     ).toBe(true);
   });
 
-  it('reports throwing other built-in error constructors (TypeError)', async () => {
+  it('reports constructing other built-in error types (TypeError), thrown inline', async () => {
     const messages = await lintMessages(
       "export function f(): void {\n  throw new TypeError('boom');\n}\n",
       ORDINARY_FILE,
@@ -113,12 +119,40 @@ describe('eslint prohibitions (F-06 criterion 1: every thrown error is an AppErr
     ).toBe(true);
   });
 
-  it('does not report throwing a built-in error constructor inside lib/errors.ts', async () => {
+  // Fix round 1 (Finding 3): a throw-site-only selector (`ThrowStatement > NewExpression`)
+  // misses this — the built-in error is constructed on one line and thrown, as a bare
+  // identifier, on the next. The construction ban below fires at the `new Error(...)` site
+  // regardless of what happens to the resulting value afterward, which is what closes this.
+  it('reports constructing a built-in Error even when not thrown inline (indirect throw)', async () => {
+    const messages = await lintMessages(
+      "export function f(): void {\n  const e = new Error('boom');\n  throw e;\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('AppError')),
+    ).toBe(true);
+  });
+
+  it('does not report constructing a built-in error inside lib/errors.ts', async () => {
     const ruleIds = await lint(
       "export function f(): void {\n  throw new Error('boom');\n}\n",
       'lib/errors.ts',
     );
     expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+
+  // Fix round 1 (Finding 1): the previous lib/errors.ts override turned the whole
+  // `no-restricted-syntax` rule off, which also silently suppressed FETCH_BAN — a
+  // regression of F-01 criterion 4 that the test above (which never exercises fetch)
+  // could not have caught. This asserts the fetch ban specifically, on the same file.
+  it('still reports bare fetch(...) inside lib/errors.ts', async () => {
+    const messages = await lintMessages(
+      'export async function load(): Promise<Response> {\n  return fetch("https://example.com");\n}\n',
+      'lib/errors.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/net.ts')),
+    ).toBe(true);
   });
 
   it('reports declaring a class that extends the built-in Error directly', async () => {
@@ -139,12 +173,42 @@ describe('eslint prohibitions (F-06 criterion 1: every thrown error is an AppErr
     expect(ruleIds).not.toContain('no-restricted-syntax');
   });
 
-  it('still bans throwing a built-in error constructor inside lib/net.ts, despite its fetch override', async () => {
+  it('still bans constructing a built-in error inside lib/net.ts, despite its fetch override', async () => {
     const ruleIds = await lint(
       "export function f(): void {\n  throw new Error('boom');\n}\n",
       'lib/net.ts',
     );
     expect(ruleIds).toContain('no-restricted-syntax');
+  });
+
+  // Composer decision (fix round 1, Finding 3): tests/** is exempted from the construction
+  // ban only, so a test can legitimately synthesize a foreign plain Error to prove
+  // AppError's `cause` option — this is exactly what tests/errors.test.ts:38-51 does.
+  // Reuses tests/errors.test.ts's own real path (lintText overrides its content) rather
+  // than a fake tests/ path, so no new allowDefaultProject entry is needed.
+  it('does not report constructing a built-in Error inside tests/** (the cause-wrapping exemption)', async () => {
+    const ruleIds = await lint("const e = new Error('boom');\n", 'tests/errors.test.ts');
+    expect(ruleIds).not.toContain('no-restricted-syntax');
+  });
+
+  it('still reports a class extending Error inside tests/** — the exemption is construction-only', async () => {
+    const messages = await lintMessages(
+      'export class SneakyTestError extends Error {}\n',
+      'tests/errors.test.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('AppError')),
+    ).toBe(true);
+  });
+
+  it('still reports bare fetch(...) inside tests/** — the exemption is construction-only', async () => {
+    const messages = await lintMessages(
+      'export async function load(): Promise<Response> {\n  return fetch("https://example.com");\n}\n',
+      'tests/errors.test.ts',
+    );
+    expect(
+      messages.some((m) => m.ruleId === 'no-restricted-syntax' && m.message.includes('lib/net.ts')),
+    ).toBe(true);
   });
 
   it('reports throwing a non-Error literal value (@typescript-eslint/only-throw-error)', async () => {
@@ -170,7 +234,7 @@ describe('eslint prohibitions (F-06 criterion 1: every thrown error is an AppErr
   });
 });
 
-describe('eslint prohibitions (F-06 criterion 2: no catch {})', () => {
+describe('eslint prohibitions (F-06 criterion 2, part 1: no catch {})', () => {
   it('reports an empty catch block', async () => {
     const ruleIds = await lint(
       "export function f(): void {\n  try {\n    JSON.parse('{}');\n  } catch {\n  }\n}\n",
@@ -185,5 +249,38 @@ describe('eslint prohibitions (F-06 criterion 2: no catch {})', () => {
       ORDINARY_FILE,
     );
     expect(ruleIds).not.toContain('no-empty');
+  });
+});
+
+describe('eslint prohibitions (F-06 criterion 2, part 2: no bare rethrow-and-swallow)', () => {
+  // `no-restricted-syntax` selectors can't express "the thrown identifier is the same one
+  // the catch clause bound" (esquery has no cross-node identity comparison), so this uses
+  // ESLint core's `no-useless-catch`, which does that check via real scope analysis —
+  // exactly the kind of "assert on real lint output, not config shape" the F-01 test style
+  // requires, just via a different, better-suited existing rule instead of a hand-rolled one.
+  it('reports a bare rethrow (catch (e) { throw e; }, nothing else in the block)', async () => {
+    const ruleIds = await lint(
+      "export function f(): void {\n  try {\n    JSON.parse('{}');\n  } catch (e) {\n    throw e;\n  }\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).toContain('no-useless-catch');
+  });
+
+  it('does not report a catch block that wraps the error before rethrowing', async () => {
+    const ruleIds = await lint(
+      "import { ConfigError } from '../lib/errors.js';\nexport function f(): void {\n  try {\n    JSON.parse('{}');\n  } catch (err) {\n    throw new ConfigError('parse failed', { cause: err });\n  }\n}\n",
+      ORDINARY_FILE,
+    );
+    expect(ruleIds).not.toContain('no-useless-catch');
+  });
+
+  // Composer decision (fix round 1, Finding 3): the bare-rethrow ban has no exemption
+  // anywhere, tests and lib/errors.ts included — unlike the construction ban above.
+  it('still reports a bare rethrow inside lib/errors.ts (no exemption for this ban)', async () => {
+    const ruleIds = await lint(
+      "export function f(): void {\n  try {\n    JSON.parse('{}');\n  } catch (e) {\n    throw e;\n  }\n}\n",
+      'lib/errors.ts',
+    );
+    expect(ruleIds).toContain('no-useless-catch');
   });
 });
