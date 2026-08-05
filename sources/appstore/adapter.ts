@@ -255,10 +255,18 @@ async function runFetchIncremental(
       // processed before it. Only AppError subclasses are caught here — anything else is a
       // genuine bug this adapter has no business swallowing.
       if (err instanceof AppError) {
+        // Fix round 1, Finding 1: an earlier pair in this same loop may already have hit the
+        // pagination ceiling before this pair threw. Without carrying that forward here, a
+        // persistently broken pair silently masks another pair's permanently incomplete
+        // coverage on every run for as long as the break lasts.
         return {
           documents,
           cursor: encodeCursorState(nextState),
-          outcome: { kind: 'partial', error: err },
+          outcome: {
+            kind: 'partial',
+            error: err,
+            ...(truncatedPairs.length > 0 ? { truncatedReason: buildTruncationReason(truncatedPairs) } : {}),
+          },
         };
       }
       throw err;
@@ -267,13 +275,11 @@ async function runFetchIncremental(
 
   const cursorOut = encodeCursorState(nextState);
   if (truncatedPairs.length > 0) {
-    // Judgment call (documented in the completion report): `cursor` stays defined here
-    // rather than `undefined`, even though `outcome.kind === 'truncated'`. FetchPage's own
-    // doc comment describes `undefined` as the truncated case's cursor value, written for a
-    // single linear walk; this adapter fans out across independent (app, territory) pairs
-    // in one call, and a pair hitting the ceiling still has a perfectly good high-water mark
-    // for future incremental polling — only fetchBackfill's bounded, one-shot-per-range
-    // truncated case (below) matches the single-walk phrasing literally.
+    // Settled rule (fix round 1, Finding 2 — sources/types.ts's SourceAdapter doc comment):
+    // `cursor` and `outcome` are independent. A fan-out call still has other pairs with a
+    // valid high-water mark even when one pair hits the ceiling, so `cursor` stays defined
+    // rather than being forced to `undefined` — discarding it would re-walk every pair from
+    // scratch on every future poll.
     return {
       documents,
       cursor: cursorOut,
@@ -310,10 +316,17 @@ async function runFetchBackfill(
         // Unlike fetchIncremental, a defined cursor here is a genuine resume point (skip
         // already-collected reviews for this exact range on retry) rather than an ongoing
         // polling mark, so this is the one 'partial' case where cursor stays defined.
+        //
+        // Fix round 1, Finding 1: carry forward any earlier pair's ceiling the same way
+        // fetchIncremental does — an early return here must not drop it either.
         return {
           documents,
           cursor: encodeCursorState(nextState),
-          outcome: { kind: 'partial', error: err },
+          outcome: {
+            kind: 'partial',
+            error: err,
+            ...(truncatedPairs.length > 0 ? { truncatedReason: buildTruncationReason(truncatedPairs) } : {}),
+          },
         };
       }
       throw err;
@@ -321,9 +334,9 @@ async function runFetchBackfill(
   }
 
   if (truncatedPairs.length > 0) {
-    // Bounded, one-shot-per-range walk: every pair was fully processed within `range` this
-    // call, so `cursor: undefined` matches FetchPage's literal "cannot page any further" —
-    // there is no follow-up call for this same range left to make.
+    // Settled rule (fix round 1, Finding 2): every pair was fully processed within `range`
+    // this call, so `cursor: undefined` correctly means "no follow-up call left to make" —
+    // unlike fetchIncremental's fan-out, there is no other pair's resume point to preserve.
     return {
       documents,
       cursor: undefined,

@@ -166,9 +166,9 @@ describe('createAppStoreAdapter', () => {
         expect(result.outcome.reason).toContain('333 (us)');
         expect(result.outcome.reason.toLowerCase()).toContain('500');
       }
-      // Judgment call documented in adapter.ts / the completion report: fetchIncremental's
-      // cursor stays defined even when truncated, since a fan-out call still has a
-      // meaningful high-water mark to continue polling from.
+      // Settled rule (fix round 1, Finding 2): fetchIncremental's cursor stays defined even
+      // when truncated, since a fan-out call still has a meaningful high-water mark to
+      // continue polling from.
       expect(result.cursor).toBeDefined();
     });
 
@@ -231,7 +231,103 @@ describe('createAppStoreAdapter', () => {
       expect(result.outcome?.kind).toBe('partial');
       if (result.outcome?.kind === 'partial') {
         expect(result.outcome.error).toBeInstanceOf(UpstreamError);
+        // Fix round 1, Finding 1: nothing was truncated before `bad` failed, so the field
+        // must be absent entirely, not merely falsy — an empty string would also be wrong.
+        expect(result.outcome.truncatedReason).toBeUndefined();
       }
+    });
+  });
+
+  describe('fix round 1, Finding 1: truncatedReason survives an early return from the fan-out loop', () => {
+    it('carries an earlier pair\'s ceiling forward when a later pair then fails (fetchIncremental)', async () => {
+      const truncated = { appId: 'A1', territory: 'us' };
+      const failing = { appId: 'B1', territory: 'us' };
+      const routes = new Map<string, () => Response>();
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const entry = buildReviewJson({ rating: 5, updatedIso: isoDaysAgo(page - 1) });
+        routes.set(buildFeedUrl(truncated.appId, truncated.territory, page), () => jsonResponse(feedEnvelope([entry])));
+      }
+      // Exhausts lib/net.ts's retries on every attempt, surfacing as UpstreamError — same
+      // shape as the plain partial-outcome test above, but `truncated` is walked first
+      // (pairs are processed in `appIds x territories` order), so its ceiling is already
+      // recorded by the time `failing` throws.
+      routes.set(buildFeedUrl(failing.appId, failing.territory, 1), () => new Response(null, { status: 500 }));
+      const netClient = buildTestNetClient(routes);
+      const adapter = createAppStoreAdapter({
+        appIds: [truncated.appId, failing.appId],
+        territories: ['us'],
+        netClient,
+      });
+
+      const result = await adapter.fetchIncremental(undefined);
+
+      expect(result.documents).toHaveLength(MAX_PAGES);
+      expect(result.outcome?.kind).toBe('partial');
+      if (result.outcome?.kind === 'partial') {
+        expect(result.outcome.error).toBeInstanceOf(UpstreamError);
+        expect(result.outcome.truncatedReason).toBeDefined();
+        expect(result.outcome.truncatedReason).toContain('A1 (us)');
+        expect(result.outcome.truncatedReason?.toLowerCase()).toContain('500');
+      }
+    });
+
+    it('carries an earlier pair\'s ceiling forward when a later pair then fails (fetchBackfill)', async () => {
+      const truncated = { appId: 'A2', territory: 'us' };
+      const failing = { appId: 'B2', territory: 'us' };
+      const routes = new Map<string, () => Response>();
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const entry = buildReviewJson({ rating: 5, updatedIso: isoDaysAgo(page - 1) });
+        routes.set(buildFeedUrl(truncated.appId, truncated.territory, page), () => jsonResponse(feedEnvelope([entry])));
+      }
+      routes.set(buildFeedUrl(failing.appId, failing.territory, 1), () => new Response(null, { status: 500 }));
+      const netClient = buildTestNetClient(routes);
+      const adapter = createAppStoreAdapter({
+        appIds: [truncated.appId, failing.appId],
+        territories: ['us'],
+        netClient,
+      });
+
+      const range = { since: new Date('2026-01-01T00:00:00.000Z'), until: new Date('2026-12-31T00:00:00.000Z') };
+      const result = await adapter.fetchBackfill(range, undefined);
+
+      expect(result.documents).toHaveLength(MAX_PAGES);
+      expect(result.outcome?.kind).toBe('partial');
+      if (result.outcome?.kind === 'partial') {
+        expect(result.outcome.error).toBeInstanceOf(UpstreamError);
+        expect(result.outcome.truncatedReason).toBeDefined();
+        expect(result.outcome.truncatedReason).toContain('A2 (us)');
+      }
+    });
+
+    it('leaves an already-collected pair\'s high-water mark advanced and a failing pair\'s untouched (fetchIncremental)', async () => {
+      // Distinct from the "resumed call" fetchBackfill test below: this asserts the *shape*
+      // of nextState across the early return itself — a pair processed before the failure
+      // must show its new progress, and the failing pair's own prior mark (from an inbound
+      // cursor) must be left exactly as it was, not reset to `undefined` or advanced.
+      const good = { appId: 'C1', territory: 'us' };
+      const bad = { appId: 'D1', territory: 'us' };
+      const priorMark = isoDaysAgo(5);
+      const initialCursor = JSON.stringify({
+        [`${good.appId}:${good.territory}`]: priorMark,
+        [`${bad.appId}:${bad.territory}`]: priorMark,
+      });
+      const routes = new Map<string, () => Response>();
+      routes.set(buildFeedUrl(good.appId, good.territory, 1), () =>
+        jsonResponse(feedEnvelope([buildReviewJson({ rating: 5, updatedIso: isoDaysAgo(0) })])),
+      );
+      routes.set(buildFeedUrl(good.appId, good.territory, 2), emptyFeedResponse);
+      routes.set(buildFeedUrl(bad.appId, bad.territory, 1), () => new Response(null, { status: 500 }));
+      const netClient = buildTestNetClient(routes);
+      const adapter = createAppStoreAdapter({ appIds: [good.appId, bad.appId], territories: ['us'], netClient });
+
+      const result = await adapter.fetchIncremental(initialCursor);
+
+      expect(result.documents).toHaveLength(1);
+      expect(result.outcome?.kind).toBe('partial');
+      expect(result.cursor).toBeDefined();
+      const decoded = JSON.parse(result.cursor ?? '{}') as Record<string, string>;
+      expect(decoded[`${good.appId}:${good.territory}`]).toBe(isoDaysAgo(0));
+      expect(decoded[`${bad.appId}:${bad.territory}`]).toBe(priorMark);
     });
   });
 
@@ -341,6 +437,10 @@ describe('createAppStoreAdapter', () => {
       const first = await adapter.fetchBackfill(range, undefined);
       expect(first.documents).toHaveLength(1);
       expect(first.outcome?.kind).toBe('partial');
+      if (first.outcome?.kind === 'partial') {
+        // Fix round 1, Finding 1: `good` never hit the ceiling, so no truncation to carry.
+        expect(first.outcome.truncatedReason).toBeUndefined();
+      }
       expect(first.cursor).toBeDefined();
 
       // Retry: both pairs now succeed. `good` would be walked again (fetchBackfill always

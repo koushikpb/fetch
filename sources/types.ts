@@ -47,6 +47,17 @@ export type Cursor = string;
  *    with `outcome: { kind: 'partial', error }` instead is strictly additive: an adapter
  *    with nothing worth salvaging (the first item itself fails) should keep just throwing —
  *    `SourceAdapter`'s doc comment below still describes that as the default, expected path.
+ *
+ * Fix round 1, Finding 1: `partial.truncatedReason` (optional) is a rider on the case above,
+ * not a third case. `partial` and `truncated` are not symmetric — `partial` decides the
+ * page's *disposition* (the run is incomplete, retry it), while truncation is a *standing
+ * fact about coverage* that can accompany any disposition. A fan-out adapter walking several
+ * independent units of work (I-03's app/territory pairs) can hit the structural ceiling on
+ * one unit and then a thrown error on a later one in the same call; without a place to carry
+ * both, the earlier unit's ceiling is silently dropped every time the later one keeps
+ * failing, masking permanently incomplete coverage for as long as that failure persists. Set
+ * it to the same reason a `'truncated'` outcome would have carried; leave it absent — never
+ * an empty string — when nothing was truncated before the error.
  */
 export type FetchPageOutcome =
   | {
@@ -62,6 +73,13 @@ export type FetchPageOutcome =
        * i.e. exactly what would otherwise have been thrown and lost.
        */
       readonly error: AppError;
+      /**
+       * Same `reason` a `'truncated'` outcome would have carried, present only when an
+       * earlier-processed unit of this same fan-out hit a structural ceiling before the unit
+       * that triggered `error` failed. Absent — not an empty string — when nothing was
+       * truncated before the failure.
+       */
+      readonly truncatedReason?: string;
     };
 
 /**
@@ -128,11 +146,18 @@ export interface HealthCheckResult {
  *   `{ documents: <whatever was already collected>, cursor, outcome: { kind: 'partial',
  *   error } }` instead of letting the rejection discard them (see `FetchPageOutcome`). Both
  *   are valid on every call; nothing requires the second, and an adapter with nothing yet
- *   worth salvaging should keep just throwing.
+ *   worth salvaging should keep just throwing. If an earlier unit of the same fan-out hit
+ *   the structural ceiling below before this later failure, carry that forward too via
+ *   `outcome.truncatedReason` rather than letting the early return drop it.
  * - A structural pagination ceiling the adapter can never fetch past (I-03's App Store
  *   500-review RSS limit) is a third case: not a thrown error, and not ordinary exhaustion
- *   either. Return `{ documents, cursor: undefined, outcome: { kind: 'truncated', reason } }`
- *   so I-05 can tell "caught up" apart from "structurally capped" and record the latter.
+ *   either. Return `{ documents, cursor, outcome: { kind: 'truncated', reason } }` so I-05
+ *   can tell "caught up" apart from "structurally capped" and record the latter. `cursor`
+ *   and `outcome` answer independent questions — `cursor` is "where do I resume?", `outcome`
+ *   is "was this page's coverage complete?" — so `cursor` follows its usual rule here too:
+ *   `undefined` when there is genuinely no follow-up call left to make for this range,
+ *   defined when other work in the same fan-out still has a valid resume point that
+ *   discarding would force back to the start.
  *
  * `checkHealth` is the one method with a stricter rule than "let it propagate": see
  * `HealthCheckResult`'s doc comment for why it must never throw at all, not even the
