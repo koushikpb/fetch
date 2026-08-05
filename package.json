@@ -19,6 +19,7 @@
     "db:migrate": "tsx --env-file=.env scripts/db-migrate.ts",
     "db:seed": "tsx --env-file=.env scripts/db-seed.ts",
     "ingest": "tsx --env-file=.env scripts/ingest.ts",
+    "worker": "tsx --env-file=.env scripts/worker.ts",
     "smoke": "tsx --env-file=.env smoke.ts"
   },
   "devDependencies": {
@@ -37,6 +38,7 @@
     "@anthropic-ai/sdk": "^0.115.0",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.22.0",
+    "pg-boss": "^12.27.0",
     "zod": "^4.4.3"
   }
 }
