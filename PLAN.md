@@ -37,7 +37,7 @@ whose `PLAN.md` entry is missing is not done.
 
 **Phase:** 0 — Foundation
 **Active tasks:** none
-**Next up:** F-06
+**Next up:** F-03
 **Rolling 30-day projected spend:** $0.00 (ceiling: $70.00)
 
 **Phase 0 dispatch order:** F-01 → F-06 → F-03 → F-02 → F-04 → F-05. This differs from
@@ -56,7 +56,7 @@ the `SPEC.md` blocker graph; see the decisions log entries dated 2026-08-04 for 
 | F-03 | Config and secrets | READY | F-01, F-06 | — | Dispatch 3rd |
 | F-04 | `lib/net.ts` | TODO | F-01, F-03, F-06 | — | Gates all of Phase 1 |
 | F-05 | `lib/llm.ts` + `lib/budget.ts` | TODO | F-01, F-02, F-03, F-06 | — | Gates all of Phase 2 |
-| F-06 | Error taxonomy and logging | READY | F-01 | — | Dispatch 2nd — binds F-02/03/04/05 |
+| F-06 | Error taxonomy and logging | DONE | F-01 | — | `e76b023` (1 fix round) |
 
 ### Phase 1 — Ingestion
 
@@ -155,6 +155,9 @@ don't relitigate them.*
 | 2026-08-04 | F-06 added as a blocker of F-03, F-04, F-05; dispatched second | F-06's criterion is repo-wide — "every thrown error in the repo is an instance of a class from `lib/errors.ts`". Config, net, and llm all throw. Building the taxonomy after them guarantees rework |
 | 2026-08-04 | Node 22 pinned via Homebrew `node@22`; no `use-node-version` in `.npmrc` | pnpm 11 imports `node:sqlite` and refuses to start on Node < 22.13, so the toolchain self-enforces the pin. A second version declaration would be a redundant source of truth |
 | 2026-08-04 | `O-04` in the F-01 spec text read as a typo for `O-03` | No task `O-04` exists anywhere; `O-03 — Cost projection in verify` is described in `PLAN.md` as replacing the F-01 stub |
+| 2026-08-04 | **`zod` authorized as a dependency** — first departure from the stack table | Runtime schema validation is needed in at least three places: F-03 config validation, and X-03/X-04 validating model JSON against the `PainPoint` schema ("malformed model output is quarantined"). Hand-rolling it three times is worse than one small ubiquitous dependency. No runtime cost impact. Composer decision under the `CLAUDE.md` rule that a dependency needs a task to authorize it |
+| 2026-08-04 | Repo-wide criteria are enforced by ESLint, not by inspection | F-06's "every thrown error is an `AppError`" and "no `catch {}`" are claims about the whole repo that no reviewer can verify by reading a diff. They are now lint rules with paired positive/negative tests, so later tasks inherit the guarantee mechanically |
+| 2026-08-04 | Built-in error *construction* banned, not just *throwing* | Banning only `throw new Error(...)` left `const e = new Error(); throw e;` as a bypass. Banning the `NewExpression` outside `lib/errors.ts` closes it syntactically, with no need for a custom type-aware rule. `tests/**` is exempt from the construction ban only, so tests can still synthesize a foreign error to prove `cause` wrapping |
 
 ---
 
@@ -172,6 +175,29 @@ don't relitigate them.*
 ```
 
 ---
+
+### 2026-08-04 — F-06 DONE
+**Summary:** `AppError` taxonomy, structured single-line JSON logger, `AsyncLocalStorage`
+run correlation, and ESLint enforcement of the two repo-wide criteria.
+**Files:** lib/errors.ts, lib/log.ts, lib/run-context.ts, eslint.config.js,
+tests/errors.test.ts, tests/log.test.ts, tests/eslint-rules.test.ts
+**Criteria:** all three MET after one fix round (62 tests). Criterion 1 is met *within a
+stated syntactic boundary* — see follow-ups.
+**Cost impact:** none.
+**Follow-ups:** First review found three Important defects, all real: the `lib/errors.ts`
+lint override had silently disabled F-01's bare-`fetch` ban; the logger let a caller-supplied
+`run_id` field leak through when outside a run; and criterion 1's enforcement caught only
+literal inline `throw new Error(...)`, missing indirect throw and bare rethrow. All fixed.
+Four residual bypasses of criterion 1 are documented and accepted: errors originating in
+dependencies, `no-useless-catch` requiring the catch body to be exactly one rethrow,
+Promise `.catch()` handlers, and aliased-identifier constructors — the last needs type
+information to close. Deferred minor: a `callee.property.name` esquery clause would also
+catch `new globalThis.Error(...)`.
+**Note for later tasks:** `eslint.config.js` now uses type-aware linting via
+`parserOptions.projectService` with a hand-maintained `allowDefaultProject` list of literal
+paths and an **8-file cap**. A task adding new `lintText` fixture paths in
+`tests/eslint-rules.test.ts` must reuse an entry or extend that list; hitting the cap is a
+blocker to report, not a reason to restructure `tsconfig.json`.
 
 ### 2026-08-04 — F-01 DONE
 **Summary:** pnpm workspace, strict TypeScript, ESLint, Prettier, Vitest, Node 22 pin,
