@@ -95,8 +95,8 @@ a time with `pnpm verify` re-run after each merge.
 | I-02 | Hacker News adapter | DONE | I-01 | — | `26ff1fc` (2 fix rounds) — merged `3ca1ade`. Round 1 fixed permanent evidence loss at tied timestamps; round 2 fixed the silent stall that fix introduced. Verified by mutation testing |
 | I-03 | App Store reviews adapter | DONE | I-01 | — | `2a61852` (1 fix round) — merged `8a96349`. Fix carried truncation through `partial` outcomes and settled the `cursor`/`outcome` orthogonality rule |
 | I-04 | Reddit adapter | DONE | I-01 | — | `b92d3de` (2 fix rounds) — merged. Round 1 fixed cursor advance past unexpanded pages; round 2 signalled unmappable comment children. **Inert until B-09** (no credentials); one parked finding tied to it |
-| I-05 | Ingest orchestrator | TODO | I-02, I-03, I-04 | — | Brief must carry **B-08** (new table + forward-only migration for cursor persistence) and the `createRegistry(config)` reshape — the registry currently constructs adapters with no configuration, so every entry is inert |
-| I-06 | Scheduling | TODO | I-05 | — | |
+| I-05 | Ingest orchestrator | DONE | I-02, I-03, I-04 | — | `e463476` (1 fix round) — merged `6120b3e`. Cleared **B-08**; reshaped the registry to `createRegistry(config)`. First task in the phase to pass review with no Critical or Important |
+| I-06 | Scheduling | DONE | I-05 | — | `12b3ca5` (2 fix rounds) — merged `a3ea456`. Implementer found 4 real bugs by running, incl. `createQueue` being a no-op that made retry limits "configurable in name only"; reviewer found the crash lockout it missed |
 
 ### Phase 2 — Filter and extract
 
