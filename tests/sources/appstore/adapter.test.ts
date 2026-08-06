@@ -356,6 +356,35 @@ describe('createAppStoreAdapter', () => {
     });
   });
 
+  describe('I-03-fix defect 3: identifies itself with a User-Agent', () => {
+    it('sends a descriptive User-Agent header on both the review-fetch and checkHealth request paths', async () => {
+      // A capturing transport rather than makeRoutedTransport's routes map — the thing under
+      // test here is what performRequest hands the transport as `init`, not the response.
+      const pair = { appId: '999', territory: 'us' };
+      const seenUserAgents: (string | undefined)[] = [];
+      const transport: Transport = (url, init) => {
+        if (url !== buildFeedUrl(pair.appId, pair.territory, 1)) {
+          // tests/** is exempt from the construct-built-in-error ban (eslint.config.js
+          // TESTS_GLOB override) — a wiring bug in this test, not production code.
+          throw new Error(`unexpected request: ${url}`);
+        }
+        seenUserAgents.push((init.headers as Record<string, string> | undefined)?.['User-Agent']);
+        return Promise.resolve(emptyFeedResponse());
+      };
+      const netClient = createNetClient({ transport, sleep: async () => {} });
+      const adapter = createAppStoreAdapter({ appIds: [pair.appId], territories: [pair.territory], netClient });
+
+      await adapter.fetchIncremental(undefined);
+      await adapter.checkHealth();
+
+      expect(seenUserAgents).toHaveLength(2);
+      for (const userAgent of seenUserAgents) {
+        expect(userAgent).toBeDefined();
+        expect(userAgent).toMatch(/^fetch-app-appstore-adapter\//);
+      }
+    });
+  });
+
   describe('fetchBackfill', () => {
     it('includes only entries within [range.since, range.until], skipping newer ones while still paging for older matches', async () => {
       const pair = { appId: '666', territory: 'us' };

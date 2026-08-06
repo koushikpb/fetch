@@ -89,6 +89,26 @@ function isJsonRecord(value: unknown): value is JsonRecord {
 }
 
 /**
+ * Drops `author.uri` before an entry reaches `raw`. That field is
+ * `https://itunes.apple.com/<territory>/reviews/id<N>` — `<N>` is a stable Apple customer
+ * ID that survives display-name changes and resolves to that reviewer's complete review
+ * history across every app they have ever reviewed. Nothing downstream reads it (`raw`
+ * exists for future re-normalization, not for this field), and CLAUDE.md rule 5 forbids
+ * retaining an identifier that resolves people across platforms — `author.name` (the
+ * display name, already duplicated in `document.authorHandle`) is unaffected and stays.
+ * Applied here, at the one place `raw` is constructed, so every later reader of the column
+ * inherits the redaction rather than needing to know to filter it themselves.
+ */
+function stripReviewerIdentity(entry: JsonRecord): JsonRecord {
+  const author = entry.author;
+  if (!isJsonRecord(author) || !('uri' in author)) {
+    return entry;
+  }
+  const authorWithoutUri = Object.fromEntries(Object.entries(author).filter(([key]) => key !== 'uri'));
+  return { ...entry, author: authorWithoutUri };
+}
+
+/**
  * Parses one page's HTTP response into the raw, per-entry `unknown` values still needing
  * per-entry validation (`parseReviewEntry`). Throws `UpstreamError` only when the page as a
  * whole is unusable (not valid JSON, or missing the `feed` envelope) — an individual
@@ -190,11 +210,14 @@ export function parseReviewEntry(raw: unknown, pair: AppTerritoryPair): ParsedRe
     // `rating` lives here, not only in `raw` (composer resolution 2) — X-02's prefilter and
     // every later scoring stage read it from here.
     engagement: { rating, voteCount, voteSum },
-    // The untouched entry, not `result.data` — `reviewEntrySchema` only declares the fields
-    // this adapter reads, so its parsed output would silently drop every other field. `raw`
-    // exists specifically so a future re-normalization isn't limited to what this version of
-    // the mapping thought to keep (wave 3 shared context resolution 5).
-    raw,
+    // The untouched entry minus `author.uri` (stripReviewerIdentity), not `result.data` —
+    // `reviewEntrySchema` only declares the fields this adapter reads, so its parsed output
+    // would silently drop every other field. `raw` exists specifically so a future
+    // re-normalization isn't limited to what this version of the mapping thought to keep
+    // (wave 3 shared context resolution 5) — but that only extends to fields this adapter is
+    // allowed to retain at all, and a permanent, cross-app resolvable customer ID (CLAUDE.md
+    // rule 5) is not one of them.
+    raw: stripReviewerIdentity(raw),
   };
   return { document, createdAt };
 }
