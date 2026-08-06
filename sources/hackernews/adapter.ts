@@ -15,7 +15,7 @@ import { log } from '../../lib/log.js';
 import { AppError } from '../../lib/errors.js';
 import type { Document, JsonRecord } from '../../lib/types.js';
 import type { BackfillRange, Cursor, FetchPage, FetchPageOutcome, SourceAdapter } from '../types.js';
-import type { HackerNewsAdapterOptions } from './types.js';
+import type { HackerNewsAdapterOptions, HydrationOutcome } from './types.js';
 
 const ALGOLIA_SEARCH_URL = 'https://hn.algolia.com/api/v1/search_by_date';
 const FIREBASE_BASE_URL = 'https://hacker-news.firebaseio.com/v0';
@@ -31,6 +31,16 @@ const DEFAULT_HITS_PER_PAGE = 1000;
 const DEFAULT_INITIAL_LOOKBACK_SECONDS = 24 * 60 * 60;
 const DEFAULT_INDEX_LAG_BUFFER_SECONDS = 60;
 const DEFAULT_MAX_PAGES_PER_QUERY = 20;
+
+// I-02-fix, composer resolution 1 (class 2): same ratio and same rationale as Reddit's
+// `MAPPING_SHORTFALL_TRUNCATION_RATIO` (sources/reddit/adapter.ts) — not imported, since it
+// is that module's own private constant and CLAUDE.md's types.ts convention already forbids
+// reaching into another module's internals for something that isn't its declared public
+// entry point. A handful of malformed bodies is normal API noise; a majority means the
+// per-item shape moved under us and silently dropping the rest while the cursor marches on
+// is exactly the "run reports clean success having ingested nothing" defect this task exists
+// to close.
+const HYDRATION_SHORTFALL_TRUNCATION_RATIO = 0.5;
 
 // Only the fields this adapter actually reads; unknown fields are neither required nor
 // rejected (`nbHits`/`hitsPerPage`/`page`/`query`/... all vary across calls and none of them
@@ -151,29 +161,37 @@ function toDocument(item: FirebaseItem): Document {
 }
 
 /**
- * Fetches and hydrates one item by id, returning `undefined` for every "no document" case
- * instead of throwing — brief resolution 3's three genuinely different paths:
+ * Fetches and hydrates one item by id, classifying every "no document" case through
+ * `HydrationOutcome` (I-02-fix, composer resolution 1) instead of collapsing them into a
+ * bare `undefined` — the whole-branch review's finding was precisely that a caller could not
+ * tell these apart, so the boundary math ended up trusting a page as fully covered no matter
+ * how many of its hydrations produced nothing. See `HydrationOutcome`'s own doc comment
+ * (./types.ts) for what each case means and why `collectWindow` treats it differently:
  *   1. Firebase returns `200` with a literal `null` body for a missing item (verified live
  *      against a deliberately out-of-range id) — not a 404, so this is a data check, not a
- *      status check.
+ *      status check. `'filtered'`.
  *   2. `deleted: true` — the item exists but Hacker News scrubbed its content (verified live
  *      against real deleted comments; the payload keeps `id`/`time`/`type` but drops
- *      `by`/`text`).
+ *      `by`/`text`). `'filtered'`.
  *   3. `dead: true` — flagged/killed but not scrubbed (verified live; still carries
- *      `by`/`text`/`title`).
- * A fourth, defensive case (an unexpected `type`, or a shape that fails validation) is not
- * one of the three the brief calls out, but is handled the same way for the same reason:
- * one item's unusual data should not abort the page.
+ *      `by`/`text`/`title`). `'filtered'`.
+ *   4. `type` outside `story`/`comment` (job, poll, pollopt, ...) — a deliberate exclusion,
+ *      not a loss. `'filtered'`.
+ *   5. A non-`200` status — transient, might not repeat on retry. `'transient-failure'`.
+ *   6. A shape `FirebaseItemSchema.safeParse` rejects — deterministic, will not resolve by
+ *      retrying. `'malformed'`.
+ * One item's unusual data or a single bad response must not abort the rest of the page
+ * either way, which is why this still returns a value rather than throwing.
  */
-async function hydrateItem(net: NetClient, id: string): Promise<Document | undefined> {
+async function hydrateItem(net: NetClient, id: string): Promise<HydrationOutcome> {
   const res = await net.request(`${FIREBASE_BASE_URL}/item/${id}.json`, { headers: jsonHeaders() });
   if (res.status !== 200) {
     log.warn('hackernews: unexpected status hydrating item', { itemId: id, status: res.status });
-    return undefined;
+    return { kind: 'transient-failure', status: res.status };
   }
   const json: unknown = await res.json();
   if (json === null) {
-    return undefined;
+    return { kind: 'filtered' };
   }
   const parsed = FirebaseItemSchema.safeParse(json);
   if (!parsed.success) {
@@ -181,23 +199,45 @@ async function hydrateItem(net: NetClient, id: string): Promise<Document | undef
       itemId: id,
       issues: parsed.error.issues.map((issue) => issue.message),
     });
-    return undefined;
+    return { kind: 'malformed' };
   }
   const item = parsed.data;
   if (item.deleted === true || item.dead === true) {
-    return undefined;
+    return { kind: 'filtered' };
   }
   if (item.type !== 'story' && item.type !== 'comment') {
-    return undefined;
+    return { kind: 'filtered' };
   }
-  return toDocument(item);
+  return { kind: 'document', document: toDocument(item) };
 }
 
 interface WindowResult {
   readonly documents: Document[];
-  /** Only meaningful when `outcome` is absent — see the call sites. */
+  /**
+   * The boundary this call can honestly claim reached. Always meaningful (I-02-fix) — before
+   * this fix it was documented as "only meaningful when `outcome` is absent" because
+   * `resultToPage` discarded the cursor outright whenever any outcome was set, which was
+   * correct for fix round 2's no-progress stall but wrong for a `truncated` outcome that
+   * still reflects genuine progress (composer resolution 1, class 2: a malformed-item
+   * shortfall must *advance*, not just get logged). `cursor` and `outcome` answer independent
+   * questions per `SourceAdapter`'s own doc comment (sources/types.ts) — this field is what
+   * lets both call sites honor that instead of conflating "was this page's coverage clean?"
+   * with "did this call make progress?".
+   */
   readonly confirmedThroughSec: number;
   readonly outcome?: FetchPageOutcome;
+}
+
+/**
+ * `cursor` and `outcome` are independent facts (`SourceAdapter`'s own doc comment,
+ * sources/types.ts) — a page can report a `truncated` shortfall and still have a genuine
+ * resume point (composer resolution 1, class 2 must *advance*), or report nothing at all and
+ * still have made zero progress (fix round 2's no-distinct-value stall). `undefined` here
+ * specifically means "no honest resume point beyond what this call was given", never "cursor
+ * is unknown".
+ */
+function deriveCursor(confirmedThroughSec: number, sinceSec: number): Cursor | undefined {
+  return confirmedThroughSec > sinceSec ? String(confirmedThroughSec) : undefined;
 }
 
 /**
@@ -248,6 +288,30 @@ interface WindowResult {
  * 'truncated', reason }` instead turns it into a terminating, recordable signal I-05 can act
  * on. See the boundary-tie and no-progress-signal tests in
  * tests/sources/hackernews/adapter.test.ts for the reproductions these two rounds close.
+ *
+ * Fix round 3 (I-02-fix) closes the remaining gap the whole-branch review found: rounds 1
+ * and 2 only ever looked at Algolia's own `created_at_i` values, never at whether
+ * `hydrateItem` actually turned each one into a `Document`. A capped or uncapped query alike
+ * used to claim its whole window covered "regardless of how many hydrations produced
+ * nothing" (the review's own words) — so a non-200 Firebase response or a schema rejection
+ * on every single item still reported a clean, fully-advanced boundary. `HydrationOutcome`
+ * (./types.ts) now tells this function which of three things happened to each hit, and it
+ * responds to each differently (composer resolution 1):
+ *   - `'filtered'` (a deliberate non-ingestion) changes nothing — same as before this fix.
+ *   - `'transient-failure'` retreats the shared boundary below the *earliest* such miss this
+ *     call touched, the same "err toward re-fetching" logic fix round 1 already established
+ *     for a tied timestamp, just triggered by a different condition. This is the coarsest
+ *     bound this adapter's single-timestamp cursor can express — it re-includes everything
+ *     from that point on, not just the one missed item — but everything it re-includes gets
+ *     a free, deduplicated re-fetch, never a second loss.
+ *   - `'malformed'` does *not* retreat the boundary (retrying a deterministic rejection buys
+ *     nothing and would wedge the source forever on one bad item), but is counted, and once
+ *     malformed items are the majority of what this call could actually attempt to parse,
+ *     `outcome: { kind: 'truncated', reason }` reports it — Reddit's
+ *     `MAPPING_SHORTFALL_TRUNCATION_RATIO` precedent, not a new pattern.
+ * A `truncated` outcome from this new path still carries a genuine, advanced
+ * `confirmedThroughSec`, unlike fix round 2's no-progress stall — see `deriveCursor` and the
+ * call sites below for how the two cases stay distinguishable.
  */
 async function collectWindow(
   net: NetClient,
@@ -269,6 +333,17 @@ async function collectWindow(
   // retreat to — collected so the 'truncated' reason (below) can name the actual cause
   // rather than just reporting "stuck".
   const stalledQueries: string[] = [];
+  // Fix round 3 (I-02-fix), class 1: the lowest `created_at_i` among every hydration this
+  // call saw fail with a non-200 status. Tracked across every query, not per-query, since
+  // `confirmedThroughSec` is itself one shared value across every configured query — a miss
+  // under any one of them constrains the same boundary.
+  let earliestTransientFailureSec: number | undefined;
+  // Fix round 3, class 2: counted across every query for the same reason. `hydratedCount`
+  // is deliberately *not* every hit seen — a `'filtered'` item (composer resolution 1, class
+  // 3) is a deliberate non-ingestion, not a parse attempt, and must not enter this ratio in
+  // either position or a quiet day full of job/poll postings would misread as an outage.
+  let hydratedCount = 0;
+  let malformedCount = 0;
 
   try {
     for (const query of queries) {
@@ -306,9 +381,24 @@ async function collectWindow(
             continue;
           }
           seenIds.add(hit.objectID);
-          const doc = await hydrateItem(net, hit.objectID);
-          if (doc !== undefined) {
-            documents.push(doc);
+          const hydration = await hydrateItem(net, hit.objectID);
+          switch (hydration.kind) {
+            case 'document':
+              documents.push(hydration.document);
+              hydratedCount += 1;
+              break;
+            case 'malformed':
+              malformedCount += 1;
+              break;
+            case 'transient-failure':
+              earliestTransientFailureSec =
+                earliestTransientFailureSec === undefined
+                  ? hit.created_at_i
+                  : Math.min(earliestTransientFailureSec, hit.created_at_i);
+              break;
+            case 'filtered':
+              // Composer resolution 1, class 3: advances freely, counts toward nothing.
+              break;
           }
         }
       }
@@ -328,6 +418,8 @@ async function collectWindow(
       }
     }
 
+    const reasons: string[] = [];
+
     if (stalledQueries.length > 0) {
       // At least one query could not advance the shared boundary this call maintains across
       // every configured query (`confirmedThroughSec` is the minimum across all of them), so
@@ -335,15 +427,45 @@ async function collectWindow(
       // hydrated, but signal `truncated` rather than minting back the same cursor the caller
       // passed in — see collectWindow's doc comment (fix round 2) for why silently doing the
       // latter is a hot-loop risk, not just an inefficiency.
-      const reason =
+      reasons.push(
         `hackernews: quer${stalledQueries.length === 1 ? 'y' : 'ies'} ` +
-        `${stalledQueries.map((q) => `"${q}"`).join(', ')} capped at ${maxPagesPerQuery} ` +
-        `page(s) per call, but the fetched set contains no created_at_i distinctly above ` +
-        `${sinceSec} to safely advance to — an unfetched item may share that exact second. ` +
-        `Increase maxPagesPerQuery or hitsPerPage for this configuration to make progress.`;
-      return { documents, confirmedThroughSec: sinceSec, outcome: { kind: 'truncated', reason } };
+          `${stalledQueries.map((q) => `"${q}"`).join(', ')} capped at ${maxPagesPerQuery} ` +
+          `page(s) per call, but the fetched set contains no created_at_i distinctly above ` +
+          `${sinceSec} to safely advance to — an unfetched item may share that exact second. ` +
+          `Increase maxPagesPerQuery or hitsPerPage for this configuration to make progress.`,
+      );
+      confirmedThroughSec = sinceSec;
     }
-    return { documents, confirmedThroughSec };
+
+    // Fix round 3, class 1: retreat below the earliest transient hydration miss, whatever
+    // else happened. This composes with the stalled-queries retreat above rather than
+    // replacing it — `Math.min` of two values that can each only push the boundary down.
+    if (earliestTransientFailureSec !== undefined) {
+      confirmedThroughSec = Math.min(confirmedThroughSec, earliestTransientFailureSec - 1);
+    }
+
+    // Fix round 3, class 2: a schema rejection is deterministic, so it never retreats the
+    // boundary (that would wedge the source on one bad item forever) — it only gets counted,
+    // and surfaced once malformed items are the majority of what this call could actually
+    // attempt to parse. `parseableAttempts` excludes `'filtered'` items on purpose (see the
+    // comment where `hydratedCount`/`malformedCount` are declared).
+    const parseableAttempts = hydratedCount + malformedCount;
+    if (
+      parseableAttempts > 0 &&
+      malformedCount / parseableAttempts >= HYDRATION_SHORTFALL_TRUNCATION_RATIO
+    ) {
+      reasons.push(
+        `hackernews: ${malformedCount} of ${parseableAttempts} hydrated item(s) this call ` +
+          `failed FirebaseItemSchema validation — Hacker News's per-item response shape may ` +
+          `have changed.`,
+      );
+    }
+
+    const outcome: FetchPageOutcome | undefined =
+      reasons.length > 0 ? { kind: 'truncated', reason: reasons.join(' ') } : undefined;
+    return outcome === undefined
+      ? { documents, confirmedThroughSec }
+      : { documents, confirmedThroughSec, outcome };
   } catch (err) {
     // Fan-out failure partway through (brief's framing of this exact adapter as the
     // paradigm case for FetchPageOutcome's 'partial' variant): salvage whatever was already
@@ -361,17 +483,16 @@ async function collectWindow(
   }
 }
 
-function resultToPage(result: WindowResult): FetchPage {
-  if (result.outcome !== undefined) {
-    // Neither outcome carries a resumable cursor, but for different reasons (FetchPage's own
-    // doc comment draws this distinction): 'partial' means a fan-out failure cut this call
-    // short, so the next call simply replays the same starting boundary from scratch;
-    // 'truncated' means this call structurally cannot page any further under its current
-    // configuration — see collectWindow's doc comment (fix round 2) for why minting a cursor
-    // back to the caller in that second case would be a lie, not just unhelpful.
-    return { documents: result.documents, cursor: undefined, outcome: result.outcome };
-  }
-  return { documents: result.documents, cursor: String(result.confirmedThroughSec) };
+function resultToPage(result: WindowResult, sinceSec: number): FetchPage {
+  // I-02-fix: cursor is derived the same way regardless of `outcome` — see `deriveCursor`
+  // and `WindowResult.confirmedThroughSec`'s own doc comment for why unconditionally
+  // discarding it whenever any outcome was set (the pre-fix behaviour here) silently
+  // stopped a `truncated`-but-advancing page (composer resolution 1, class 2) from ever
+  // persisting its progress.
+  const cursor = deriveCursor(result.confirmedThroughSec, sinceSec);
+  return result.outcome === undefined
+    ? { documents: result.documents, cursor }
+    : { documents: result.documents, cursor, outcome: result.outcome };
 }
 
 export function createHackerNewsAdapter(options: HackerNewsAdapterOptions = {}): SourceAdapter {
@@ -388,7 +509,15 @@ export function createHackerNewsAdapter(options: HackerNewsAdapterOptions = {}):
 
     async fetchIncremental(cursor: Cursor | undefined): Promise<FetchPage> {
       const nowSec = Math.floor(now() / 1000);
-      const sinceSec = cursor === undefined ? nowSec - initialLookbackSeconds : Number(cursor);
+      // I-02-fix, brief item 4: on the very first call (no persisted cursor yet), `sinceSec`
+      // is computed from `initialLookbackSeconds`, not returned by this adapter's own prior
+      // page — there is no earlier call whose *exclusive* upper bound this would double-count
+      // the way a resumed cursor's would. Treating it as inclusive here is exactly the same
+      // reasoning `fetchBackfill`'s own `sinceInclusive = !resuming` already applies; without
+      // it, an item created in exactly the boundary second was never fetched, on the first
+      // run only.
+      const firstRun = cursor === undefined;
+      const sinceSec = firstRun ? nowSec - initialLookbackSeconds : Number(cursor);
       const untilSec = nowSec - indexLagBufferSeconds;
 
       if (untilSec <= sinceSec) {
@@ -402,8 +531,8 @@ export function createHackerNewsAdapter(options: HackerNewsAdapterOptions = {}):
         return { documents: [], cursor: undefined };
       }
 
-      const result = await collectWindow(net, queries, sinceSec, false, untilSec, hitsPerPage, maxPagesPerQuery);
-      return resultToPage(result);
+      const result = await collectWindow(net, queries, sinceSec, firstRun, untilSec, hitsPerPage, maxPagesPerQuery);
+      return resultToPage(result, sinceSec);
     },
 
     async fetchBackfill(range: BackfillRange, cursor: Cursor | undefined): Promise<FetchPage> {
@@ -432,13 +561,18 @@ export function createHackerNewsAdapter(options: HackerNewsAdapterOptions = {}):
         hitsPerPage,
         maxPagesPerQuery,
       );
-      if (result.outcome !== undefined) {
-        return resultToPage(result);
-      }
+      // I-02-fix: `exhausted` is computed regardless of `outcome`, unlike the pre-fix code's
+      // early return on any outcome — a `truncated` malformed-shortfall (composer resolution
+      // 1, class 2) can still fully drain this range in the same call, and when it does,
+      // `cursor: undefined` is the correct claim for the same reason App Store's own
+      // `runFetchBackfill` makes it regardless of that call's `truncatedPairs`: every pair (or
+      // here, every query) was fully processed within `range`, so there is no other resume
+      // point this call would otherwise be discarding.
       const exhausted = result.confirmedThroughSec >= rangeUntilSec;
-      return exhausted
-        ? { documents: result.documents, cursor: undefined }
-        : { documents: result.documents, cursor: String(result.confirmedThroughSec) };
+      const nextCursor = exhausted ? undefined : deriveCursor(result.confirmedThroughSec, sinceSec);
+      return result.outcome === undefined
+        ? { documents: result.documents, cursor: nextCursor }
+        : { documents: result.documents, cursor: nextCursor, outcome: result.outcome };
     },
 
     async checkHealth() {

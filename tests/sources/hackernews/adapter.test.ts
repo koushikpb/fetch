@@ -48,6 +48,8 @@ interface HackerNewsTransportConfig {
   readonly hits: readonly FixtureHit[];
   /** id -> Firebase item body. `undefined` for an id present in `hits` but absent here means "Firebase returns null" — the missing-item path, not a test wiring gap. */
   readonly firebaseItems?: Readonly<Record<string, unknown>>;
+  /** id -> non-200 status Firebase returns for that item's hydration (I-02-fix: class 1, "transient-failure"). Checked before `firebaseItems`. */
+  readonly firebaseStatusOverrides?: Readonly<Record<string, number>>;
   readonly maxItem?: number;
   /** Thrown on the Nth Algolia or Firebase call (1-indexed) instead of responding, for partial-outcome and propagation tests. */
   readonly failOnCall?: number;
@@ -84,6 +86,10 @@ function makeHackerNewsTransport(config: HackerNewsTransportConfig): {
       }
       const match = /^\/v0\/item\/(.+)\.json$/.exec(parsed.pathname);
       if (match?.[1] !== undefined) {
+        const statusOverride = config.firebaseStatusOverrides?.[match[1]];
+        if (statusOverride !== undefined) {
+          return new Response(null, { status: statusOverride });
+        }
         const body = config.firebaseItems?.[match[1]];
         return jsonResponse(body === undefined ? null : body);
       }
@@ -730,6 +736,270 @@ describe('createHackerNewsAdapter', () => {
       );
 
       expect(page).toEqual({ documents: [], cursor: undefined });
+    });
+  });
+
+  describe('I-02-fix: hydration outcome classes reach the runs row (composer resolution 1)', () => {
+    it('class 1 (non-200): retreats the cursor to just below the failed item, and a later run reaches it', async () => {
+      const sinceSec = NOW_SEC - 3600;
+      const hits: FixtureHit[] = [
+        { objectID: '100', created_at_i: sinceSec + 100 }, // hydrates fine
+        { objectID: 'forbidden', created_at_i: sinceSec + 200 }, // hydrates to a 403
+      ];
+      const { adapter } = buildAdapter(
+        {
+          hits,
+          firebaseItems: { '100': { id: 100, type: 'story', time: sinceSec + 100, by: 'x', title: 't' } },
+          firebaseStatusOverrides: { forbidden: 403 },
+        },
+        { nowMs: NOW_MS },
+      );
+
+      const first = await adapter.fetchIncremental(undefined);
+
+      expect(first.documents).toHaveLength(1);
+      expect(first.documents[0]?.sourceId).toBe('100');
+      // Exact value, not just "less than untilSec": a mutant that retreats to `sinceSec`
+      // (the network-failure catch's coarser behaviour) or that forgets the `- 1` would both
+      // produce a different number here.
+      expect(first.cursor).toBe(String(sinceSec + 199));
+      // A lone transient failure does not by itself rise to a `runs`-row signal (composer
+      // resolution 1 only asks class 2 to "count and surface"; class 1's fix is the retry
+      // property proven below) — asserted so a regression that starts attaching an outcome
+      // here is visible.
+      expect(first.outcome).toBeUndefined();
+
+      // A later run, against a transport where 'forbidden' now hydrates cleanly, reaches it —
+      // the whole point of holding the boundary back instead of the pre-fix behaviour, which
+      // let this item's timestamp be claimed as confirmed and made it permanently unreachable.
+      const laterMs = NOW_MS + 20_000_000;
+      const { transport: transport2 } = makeHackerNewsTransport({
+        hits: [{ objectID: 'forbidden', created_at_i: sinceSec + 200 }],
+        firebaseItems: { forbidden: { id: 1, type: 'story', time: sinceSec + 200, by: 'y', title: 't2' } },
+      });
+      const netClient2 = createNetClient({ transport: transport2, sleep: async () => undefined, now: () => laterMs });
+      const adapter2 = createHackerNewsAdapter({
+        netClient: netClient2,
+        now: () => laterMs,
+        hitsPerPage: 1000,
+        maxPagesPerQuery: 5,
+        indexLagBufferSeconds: 10,
+        queries: [''],
+      });
+
+      const second = await adapter2.fetchIncremental(first.cursor);
+
+      expect(second.documents.map((d) => d.sourceId)).toContain('1');
+    });
+
+    it('class 1: the boundary retreats below the *earliest* of several failures, not the latest', async () => {
+      const sinceSec = NOW_SEC - 3600;
+      const hits: FixtureHit[] = [
+        { objectID: 'good', created_at_i: sinceSec + 50 },
+        { objectID: 'bad1', created_at_i: sinceSec + 150 }, // the earlier of the two failures
+        { objectID: 'bad2', created_at_i: sinceSec + 250 },
+      ];
+      const { adapter } = buildAdapter(
+        {
+          hits,
+          firebaseItems: { good: { id: 1, type: 'story', time: sinceSec + 50, by: 'x', title: 't' } },
+          // Only a non-retryable 4xx reaches `hydrateItem`'s own status check as a `Response`
+          // (lib/net.ts's own contract) — a 5xx or 429 is retried and, once exhausted, thrown
+          // as an `UpstreamError`/`RateLimitError` well before `hydrateItem` ever sees it, so
+          // it is not this class at all.
+          firebaseStatusOverrides: { bad1: 403, bad2: 404 },
+        },
+        { nowMs: NOW_MS },
+      );
+
+      const page = await adapter.fetchIncremental(undefined);
+
+      expect(page.documents).toHaveLength(1);
+      expect(page.documents[0]?.sourceId).toBe('1');
+      // A mutant that retreats to the *latest* failure (Math.max instead of Math.min) would
+      // produce `sinceSec + 249` here instead — a distinctly different, wrong value.
+      expect(page.cursor).toBe(String(sinceSec + 149));
+    });
+
+    it('class 3 (filtered): never enters the malformed-shortfall ratio, even when it vastly outnumbers parseable attempts', async () => {
+      const sinceSec = NOW_SEC - 3600;
+      const jobHits: FixtureHit[] = Array.from({ length: 8 }, (_, i) => ({
+        objectID: `job${i}`,
+        created_at_i: sinceSec + 10 * (i + 1),
+      }));
+      const hits: FixtureHit[] = [
+        ...jobHits,
+        { objectID: 'good', created_at_i: sinceSec + 500 },
+        { objectID: 'weird', created_at_i: sinceSec + 600 },
+      ];
+      const firebaseItems: Record<string, unknown> = {
+        good: { id: 1, type: 'story', time: sinceSec + 500, by: 'x', title: 't' },
+        weird: { notAnItem: true }, // malformed
+        ...Object.fromEntries(jobHits.map((h) => [h.objectID, { id: 2, type: 'job', time: h.created_at_i, title: 'hiring' }])),
+      };
+      const { adapter } = buildAdapter({ hits, firebaseItems }, { nowMs: NOW_MS });
+
+      const page = await adapter.fetchIncremental(undefined);
+
+      // The *correct* ratio counts only the 2 parseable attempts (1 success, 1 malformed) —
+      // 1/2 = 50%, at the threshold. A mutant that also counts the 8 filtered job postings as
+      // attempts would compute 1/10 = 10%, well under threshold, and this assertion would then
+      // see `outcome` absent instead of `'truncated'`.
+      expect(page.outcome?.kind).toBe('truncated');
+      if (page.outcome?.kind === 'truncated') {
+        expect(page.outcome.reason).toContain('1 of 2');
+      }
+      expect(page.documents).toHaveLength(1);
+      expect(page.documents[0]?.sourceId).toBe('1');
+    });
+
+    it('class 3: an entire page of filtered items alone never produces a shortfall signal, and the cursor still advances fully', async () => {
+      const sinceSec = NOW_SEC - 3600;
+      const hits: FixtureHit[] = Array.from({ length: 5 }, (_, i) => ({
+        objectID: `job${i}`,
+        created_at_i: sinceSec + 10 * (i + 1),
+      }));
+      const firebaseItems = Object.fromEntries(
+        hits.map((h) => [h.objectID, { id: 1, type: 'job', time: h.created_at_i, title: 'hiring' }]),
+      );
+      const { adapter } = buildAdapter({ hits, firebaseItems }, { nowMs: NOW_MS, indexLagBufferSeconds: 10 });
+
+      const page = await adapter.fetchIncremental(undefined);
+
+      expect(page.documents).toHaveLength(0);
+      // `parseableAttempts === 0` must not be treated as "100% malformed" by a stray division
+      // — the guard against dividing by zero is what keeps a quiet-but-job-posting-heavy day
+      // from reading as an outage (composer resolution 1, class 3's own warning).
+      expect(page.outcome).toBeUndefined();
+      expect(page.cursor).toBe(String(NOW_SEC - 10));
+    });
+
+    it('class 2 (malformed): below the shortfall ratio, advances silently — matching Reddit\'s below-threshold precedent', async () => {
+      const sinceSec = NOW_SEC - 3600;
+      const hits: FixtureHit[] = [
+        { objectID: '1', created_at_i: sinceSec + 100 },
+        { objectID: '2', created_at_i: sinceSec + 200 },
+        { objectID: '3', created_at_i: sinceSec + 300 },
+        { objectID: 'weird', created_at_i: sinceSec + 400 },
+      ];
+      const firebaseItems: Record<string, unknown> = {
+        '1': { id: 1, type: 'story', time: sinceSec + 100, by: 'x', title: 't' },
+        '2': { id: 2, type: 'story', time: sinceSec + 200, by: 'x', title: 't' },
+        '3': { id: 3, type: 'story', time: sinceSec + 300, by: 'x', title: 't' },
+        weird: { notAnItem: true },
+      };
+      const { adapter } = buildAdapter({ hits, firebaseItems }, { nowMs: NOW_MS });
+
+      const page = await adapter.fetchIncremental(undefined);
+
+      expect(page.documents).toHaveLength(3); // 1 of 4 parseable attempts malformed (25%) — under the 50% ratio
+      expect(page.outcome).toBeUndefined();
+      expect(page.cursor).toBe(String(NOW_SEC - 10));
+    });
+
+    it('class 2: at or above the shortfall ratio, reports "truncated" AND the cursor still advances — this is the fix', async () => {
+      const sinceSec = NOW_SEC - 3600;
+      const hits: FixtureHit[] = Array.from({ length: 4 }, (_, i) => ({
+        objectID: `item${i}`,
+        created_at_i: sinceSec + 100 * (i + 1),
+      }));
+      // Every item's body is missing the fields FirebaseItemSchema requires — what an
+      // upstream field rename looks like (the reviewer's own reproduction).
+      const firebaseItems = Object.fromEntries(hits.map((h) => [h.objectID, { renamed: true }]));
+      const { adapter } = buildAdapter({ hits, firebaseItems }, { nowMs: NOW_MS });
+
+      const page = await adapter.fetchIncremental(undefined);
+
+      expect(page.documents).toEqual([]);
+      expect(page.outcome?.kind).toBe('truncated');
+      if (page.outcome?.kind === 'truncated') {
+        expect(page.outcome.reason).toContain('4 of 4');
+      }
+      // The pre-fix `resultToPage` discarded the cursor unconditionally whenever *any*
+      // outcome was set, including this one — which meant this call's genuine progress (the
+      // full window was walked; nothing here is a capped-query stall) was never persisted,
+      // and every subsequent run re-walked and re-reported the identical page forever. This
+      // is the exact defect the reviewer's 100%-failure probe found: a mutant reverting
+      // `resultToPage`/`fetchBackfill` to the pre-fix "any outcome -> cursor undefined" rule
+      // makes this specific assertion fail.
+      expect(page.cursor).toBe(String(NOW_SEC - 10));
+    });
+
+    it('the first incremental call ever includes an item created in exactly the initial-lookback boundary second', async () => {
+      // brief item 4: the pre-fix code always used a *strictly-greater* lower bound, even on
+      // the very first call, where there is no earlier call's own upper bound to avoid
+      // double-counting — so an item created in exactly that second was never fetched.
+      const boundarySec = NOW_SEC - 3600; // nowSec - initialLookbackSeconds, exactly
+      const hits: FixtureHit[] = [{ objectID: '1', created_at_i: boundarySec }];
+      const { adapter, calls } = buildAdapter(
+        { hits, firebaseItems: { '1': { id: 1, type: 'story', time: boundarySec, by: 'x', title: 't' } } },
+        { nowMs: NOW_MS, initialLookbackSeconds: 3600 },
+      );
+
+      const page = await adapter.fetchIncremental(undefined);
+
+      const algoliaCall = calls.find((u) => u.includes('hn.algolia.com'));
+      const numericFilters = new URL(algoliaCall ?? '').searchParams.get('numericFilters');
+      expect(numericFilters).toBe(`created_at_i>=${boundarySec},created_at_i<=${NOW_SEC - 10}`);
+      expect(page.documents).toHaveLength(1); // would be 0 pre-fix
+    });
+
+    describe('fetchBackfill: cursor and outcome are independent (SourceAdapter\'s own contract)', () => {
+      it('a malformed shortfall that exhausts the whole range reports cursor undefined, same as App Store\'s own rule', async () => {
+        const rangeSince = new Date((NOW_SEC - 1000) * 1000);
+        const rangeUntil = new Date((NOW_SEC - 500) * 1000);
+        const sinceSec = Math.floor(rangeSince.getTime() / 1000);
+        const hits: FixtureHit[] = [
+          { objectID: 'a', created_at_i: sinceSec + 100 },
+          { objectID: 'b', created_at_i: sinceSec + 200 },
+          { objectID: 'c', created_at_i: sinceSec + 300 },
+        ];
+        const firebaseItems = Object.fromEntries(hits.map((h) => [h.objectID, { renamed: true }]));
+        const { adapter } = buildAdapter({ hits, firebaseItems }, { nowMs: NOW_MS });
+
+        const page = await adapter.fetchBackfill({ since: rangeSince, until: rangeUntil }, undefined);
+
+        expect(page.documents).toEqual([]);
+        expect(page.outcome?.kind).toBe('truncated');
+        // Every configured query fully walked this range in one call (uncapped), so there is
+        // no other resume point being discarded — the same reasoning App Store's
+        // `runFetchBackfill` already applies when `truncatedPairs` is non-empty but every pair
+        // finished within `range`.
+        expect(page.cursor).toBeUndefined();
+      });
+
+      it('a malformed shortfall on a call that only partly covers the range keeps a defined, resumable cursor', async () => {
+        const rangeSince = new Date((NOW_SEC - 1000) * 1000);
+        const rangeUntil = new Date((NOW_SEC - 500) * 1000);
+        const S = Math.floor(rangeSince.getTime() / 1000);
+        // 6 items; hitsPerPage 2 + maxPagesPerQuery 2 caps this call to the 4 oldest (closest
+        // to `sinceSec`), leaving the 2 newest for a later call — a genuine, non-stalled
+        // partial boundary (verified by running: confirmedThroughSec lands at S+150, the
+        // second-highest distinct value among the 4 fetched, well short of rangeUntilSec).
+        const hits: FixtureHit[] = [1, 2, 3, 4, 5, 6].map((n) => ({
+          objectID: `h${n}`,
+          created_at_i: S + 50 * n,
+        }));
+        // The 4 oldest (h1..h4) are the ones this capped call actually attempts to hydrate —
+        // all malformed, tripping the shortfall ratio on exactly the items this call touched.
+        const firebaseItems = Object.fromEntries(
+          ['h1', 'h2', 'h3', 'h4'].map((id) => [id, { renamed: true }]),
+        );
+        const { adapter } = buildAdapter(
+          { hits, firebaseItems },
+          { nowMs: NOW_MS, hitsPerPage: 2, maxPagesPerQuery: 2 },
+        );
+
+        const page = await adapter.fetchBackfill({ since: rangeSince, until: rangeUntil }, undefined);
+
+        expect(page.documents).toEqual([]);
+        expect(page.outcome?.kind).toBe('truncated');
+        // Exact value (verified by running, not derived by hand): the second-highest distinct
+        // `created_at_i` among the 4 fetched items (h3, at S+150). Defined, not undefined —
+        // proving `outcome` and a genuine partial-progress `cursor` coexist for this new
+        // truncation path exactly as they already do for App Store's own fan-out.
+        expect(page.cursor).toBe(String(S + 150));
+      });
     });
   });
 

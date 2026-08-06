@@ -4,8 +4,45 @@
 // from lib/errors.ts: CLAUDE.md explicitly names lib/net.ts as the one wrapper every
 // outbound call goes through, so referencing its exported shape here isn't the kind of
 // cross-directory data-shape coupling the "types.ts convention" targets — it's a reference
-// to the one designated seam, not to some other module's internal data model.
+// to the one designated seam, not to some other module's internal data model. `Document`
+// (below) is the same exception CLAUDE.md's convention explicitly carves out for
+// `lib/types.ts` itself.
 import type { NetClient } from '../../lib/net.js';
+import type { Document } from '../../lib/types.js';
+
+/**
+ * What `hydrateItem` (adapter.ts) learned about one Algolia hit — I-02-fix, composer
+ * resolution 1: the whole-branch review found that collapsing every "no document" case into
+ * a bare `undefined` let a cursor advance past evidence that was never actually fetched,
+ * because the caller could not tell a transient miss from a permanent one. Four cases, not
+ * three, because two of the original code's `undefined` paths (a `200`-with-null-body
+ * missing item, and `deleted`/`dead` content) were already deliberate non-ingestion — the
+ * brief's own three-way split names only the paths that actually needed to start behaving
+ * differently:
+ *
+ *  - `'document'`: hydrated cleanly, ready to become a `Document`.
+ *  - `'filtered'`: a *deliberate* exclusion — an item this adapter does not ingest
+ *    (`type` outside `story`/`comment`, e.g. `job`/`poll`/`pollopt`), a `200`-with-null-body
+ *    missing item, or `deleted`/`dead` content. None of these are a loss, so the boundary
+ *    advances past them freely and they never enter the shortfall accounting below
+ *    (composer resolution 1, class 3 — "getting this wrong makes a quiet HN day look like an
+ *    outage").
+ *  - `'transient-failure'`: Firebase answered with something other than `200` for this one
+ *    item. This might resolve itself on a later attempt, so the caller must not let the
+ *    boundary advance past it — "err toward re-fetching, never toward skipping" (composer
+ *    resolution 1, class 1).
+ *  - `'malformed'`: the body came back `200` but failed `FirebaseItemSchema.safeParse` — a
+ *    deterministic failure that will not resolve by retrying (what an upstream field rename
+ *    looks like), so holding the boundary would wedge the source forever on one bad item.
+ *    The caller advances past it, but must count and surface it once enough of a call's
+ *    items look like this — Reddit's `MAPPING_SHORTFALL_TRUNCATION_RATIO` precedent
+ *    (composer resolution 1, class 2).
+ */
+export type HydrationOutcome =
+  | { readonly kind: 'document'; readonly document: Document }
+  | { readonly kind: 'filtered' }
+  | { readonly kind: 'transient-failure'; readonly status: number }
+  | { readonly kind: 'malformed' };
 
 /**
  * Factory configuration (composer resolution 1 — adapters take their configuration as
