@@ -14,6 +14,16 @@ import {
   type CreateAppStoreAdapterOptions,
 } from './types.js';
 
+// Not required by Apple's terms (the iTunes RSS feed is public and unauthenticated), but
+// resolution 7 asks every adapter to identify itself where the platform's rules require
+// one — sending a descriptive UA regardless costs nothing and is good API citizenship,
+// matching Hacker News's adapter.ts (the other unauthenticated source in this codebase).
+const USER_AGENT = 'fetch-app-appstore-adapter/0.1 (+research tool; no auth required)';
+
+function requestHeaders(): Record<string, string> {
+  return { 'User-Agent': USER_AGENT };
+}
+
 function pairKey(pair: AppTerritoryPair): string {
   return `${pair.appId}:${pair.territory}`;
 }
@@ -76,7 +86,7 @@ function buildPairs(options: CreateAppStoreAdapterOptions): readonly AppTerritor
 
 async function fetchPageEntries(client: NetClient, appId: string, territory: string, page: number): Promise<unknown[]> {
   const url = buildFeedUrl(appId, territory, page);
-  const response = await client.request(url);
+  const response = await client.request(url, { headers: requestHeaders() });
   if (!response.ok) {
     // Verified live (2026-08-05): an unrecognized territory 404s, while an unknown app ID
     // still returns 200 with an empty feed — so a 404 here is specifically a bad territory in
@@ -353,7 +363,7 @@ async function runCheckHealth(client: NetClient, pairs: readonly AppTerritoryPai
   }
   try {
     const url = buildFeedUrl(pair.appId, pair.territory, 1);
-    const response = await client.request(url);
+    const response = await client.request(url, { headers: requestHeaders() });
     return {
       healthy: response.ok,
       detail: `App Store RSS feed returned ${response.status} for app ${pair.appId} (${pair.territory})`,

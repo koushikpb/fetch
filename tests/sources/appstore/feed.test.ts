@@ -1,9 +1,11 @@
 // Unit tests for sources/appstore/feed.ts's wire-format parsing, in isolation from
 // adapter.ts's fan-out/pagination/cursor concerns (covered separately in adapter.test.ts).
-// Fixtures under tests/fixtures/appstore/ are real responses captured live from
-// itunes.apple.com on 2026-08-05 (see each fixture's provenance below) — SPEC I-03's
-// "no XML parser dependency is authorized ... verify what the endpoint actually returns"
-// resolution, satisfied by capturing rather than assuming the shape.
+// Fixtures under tests/fixtures/appstore/ were captured live from itunes.apple.com on
+// 2026-08-05 (verifying the shape SPEC I-03's "no XML parser dependency is authorized ...
+// verify what the endpoint actually returns" resolution calls for) and then had every
+// reviewer identity — display name and the permanent Apple customer ID in `author.uri` —
+// replaced with a synthetic placeholder (I-03-fix): the fixtures test *shape*, not identity,
+// and the originals named six real people.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { UpstreamError } from '../../../lib/errors.js';
@@ -19,6 +21,18 @@ const FIXTURES_DIR = new URL('../../fixtures/appstore/', import.meta.url);
 
 function loadFixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(name, FIXTURES_DIR), 'utf8'));
+}
+
+/** Test-side mirror of feed.ts's stripReviewerIdentity, used only to build the expected
+ * value for a deep-equality assertion — the standalone `author.uri` presence/absence checks
+ * elsewhere in this file are what actually proves the strip runs, independent of this. */
+function omitAuthorUri(entry: unknown): unknown {
+  const record = entry as { author?: Record<string, unknown> };
+  if (record.author === undefined) {
+    return entry;
+  }
+  const authorWithoutUri = Object.fromEntries(Object.entries(record.author).filter(([key]) => key !== 'uri'));
+  return { ...record, author: authorWithoutUri };
 }
 
 function jsonResponse(body: unknown): Response {
@@ -120,16 +134,39 @@ describe('parseReviewEntry', () => {
     expect(parsed?.document.url).toBe('https://apps.apple.com/us/app/id284910350?see-all=reviews');
     expect(parsed?.document.title).toBe('Yelp');
     expect(parsed?.document.body).toBe('Excellent resource for information.');
-    expect(parsed?.document.authorHandle).toBe('Devkika');
+    expect(parsed?.document.authorHandle).toBe('happy_yelp_regular');
     expect(parsed?.document.createdAt).toBeInstanceOf(Date);
     // Criterion 2's real content: rating is a `number`, not a string, and lives in
     // `engagement` (X-02's prefilter reads it from there), not only inside `raw`.
     expect(parsed?.document.engagement.rating).toBe(5);
     expect(typeof parsed?.document.engagement.rating).toBe('number');
-    // `raw` is the untouched entry, not reviewEntrySchema's narrowed parse output — proven by
-    // deep-equality against the exact fixture entry, which carries fields (im:version,
-    // im:contentType, the author's `uri`) that reviewEntrySchema never declares.
-    expect(parsed?.document.raw).toEqual(fiveStarEntry);
+    // `raw` is the untouched entry minus `author.uri` (I-03-fix: stripReviewerIdentity), not
+    // reviewEntrySchema's narrowed parse output — proven by deep-equality against the exact
+    // fixture entry with `author.uri` removed, which still carries fields (im:version,
+    // im:contentType) that reviewEntrySchema never declares, so this isn't just re-asserting
+    // the Zod-validated subset.
+    expect(parsed?.document.raw).toEqual(omitAuthorUri(fiveStarEntry));
+  });
+
+  it('I-03-fix: strips the reviewer\'s permanent Apple customer ID (author.uri) out of raw', async () => {
+    // CLAUDE.md rule 5: `author.uri` is `https://itunes.apple.com/<territory>/reviews/id<N>`
+    // — a stable Apple customer ID that survives display-name changes and resolves to this
+    // person's full review history across every app they've ever reviewed. The fixture entry
+    // carries it (verified below, against the untouched entry) so this test fails if the
+    // strip is ever removed from feed.ts, not just if it was never added.
+    const entries = await parseFeedEntries(
+      jsonResponse(loadFixture('page1-mixed-ratings.json')),
+      'https://example.test/x',
+    );
+    const fiveStarEntry = entries[0] as { author: { uri?: unknown } };
+    expect(fiveStarEntry.author.uri).toBeDefined();
+
+    const parsed = parseReviewEntry(entries[0], pair);
+    const rawAuthor = (parsed?.document.raw as { author?: Record<string, unknown> } | undefined)?.author;
+    expect(rawAuthor).not.toHaveProperty('uri');
+    // `author.name` — the display name, already duplicated in `document.authorHandle` — is
+    // evidence CLAUDE.md rule 5 explicitly permits, and must survive the strip.
+    expect(rawAuthor?.name).toEqual({ label: 'happy_yelp_regular' });
   });
 
   it('preserves a one-star rating end to end (the densest-signal case criterion 2 exists for)', async () => {

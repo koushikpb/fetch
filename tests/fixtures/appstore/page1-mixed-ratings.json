@@ -12,10 +12,10 @@
       {
         "author": {
           "uri": {
-            "label": "https://itunes.apple.com/us/reviews/id821935673"
+            "label": "https://itunes.apple.com/us/reviews/id900000001"
           },
           "name": {
-            "label": "Devkika"
+            "label": "happy_yelp_regular"
           },
           "label": ""
         },
@@ -62,10 +62,10 @@
       {
         "author": {
           "uri": {
-            "label": "https://itunes.apple.com/us/reviews/id27972671"
+            "label": "https://itunes.apple.com/us/reviews/id900000002"
           },
           "name": {
-            "label": "Monty917"
+            "label": "furniture_still_stuck"
           },
           "label": ""
         },
@@ -112,10 +112,10 @@
       {
         "author": {
           "uri": {
-            "label": "https://itunes.apple.com/us/reviews/id34400852"
+            "label": "https://itunes.apple.com/us/reviews/id900000003"
           },
           "name": {
-            "label": "RacerRick"
+            "label": "undecided_diner"
           },
           "label": ""
         },
@@ -162,10 +162,10 @@
       {
         "author": {
           "uri": {
-            "label": "https://itunes.apple.com/us/reviews/id430718410"
+            "label": "https://itunes.apple.com/us/reviews/id900000004"
           },
           "name": {
-            "label": "Hockeyblade"
+            "label": "stale_reviews_critic"
           },
           "label": ""
         },
@@ -212,10 +212,10 @@
       {
         "author": {
           "uri": {
-            "label": "https://itunes.apple.com/us/reviews/id598270737"
+            "label": "https://itunes.apple.com/us/reviews/id900000005"
           },
           "name": {
-            "label": "Patrica SLT"
+            "label": "happy_bevmo_shopper"
           },
           "label": ""
         },
@@ -235,7 +235,7 @@
           "label": "BevMo South Lake Tahoe California"
         },
         "content": {
-          "label": "Great store, great prices, great employees ,,Megan is awesome !!",
+          "label": "Great store, great prices, great employees ,,the staff is awesome !!",
           "attributes": {
             "type": "text"
           }
