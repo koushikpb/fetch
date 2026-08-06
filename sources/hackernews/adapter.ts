@@ -338,6 +338,10 @@ async function collectWindow(
   // `confirmedThroughSec` is itself one shared value across every configured query — a miss
   // under any one of them constrains the same boundary.
   let earliestTransientFailureSec: number | undefined;
+  // Fix round 4 (I-02-fix round 2): how many hydrations failed transiently this call, purely
+  // for the "N of M" wording below — the boundary math above only ever needs the *earliest*
+  // one, never a count.
+  let transientFailureCount = 0;
   // Fix round 3, class 2: counted across every query for the same reason. `hydratedCount`
   // is deliberately *not* every hit seen — a `'filtered'` item (composer resolution 1, class
   // 3) is a deliberate non-ingestion, not a parse attempt, and must not enter this ratio in
@@ -395,6 +399,7 @@ async function collectWindow(
                 earliestTransientFailureSec === undefined
                   ? hit.created_at_i
                   : Math.min(earliestTransientFailureSec, hit.created_at_i);
+              transientFailureCount += 1;
               break;
             case 'filtered':
               // Composer resolution 1, class 3: advances freely, counts toward nothing.
@@ -442,6 +447,35 @@ async function collectWindow(
     // replacing it — `Math.min` of two values that can each only push the boundary down.
     if (earliestTransientFailureSec !== undefined) {
       confirmedThroughSec = Math.min(confirmedThroughSec, earliestTransientFailureSec - 1);
+
+      // Fix round 4 (I-02-fix round 2 — composer review): a *partial* transient miss, where
+      // the boundary still advanced past `sinceSec`, needs no signal — the retreat above
+      // already does its job silently, and flagging every 500-that-resolved-itself would
+      // train an operator to ignore this field. But when transient failures cost the call
+      // *all* of its forward progress, `deriveCursor` reports no cursor at all, and without
+      // this the page comes back indistinguishable from ordinary "nothing happened today"
+      // exhaustion: `documents: []`, no outcome, cursor undefined. A systemic Firebase outage
+      // or a URL-scheme change that 404s every item would then look identical to a quiet HN
+      // day, on every run, for as long as the outage lasts — precisely the defect class this
+      // whole task exists to close, just one level up: the pre-fix bug lost individual items
+      // silently, this one would have lost the *fact that anything was ever attempted*
+      // silently. `<=`, not `===`, because an inclusive first call (brief item 4) can retreat
+      // to exactly `sinceSec - 1` when the earliest failure lands on the inclusive lower
+      // bound itself. `truncated`, not `partial`: nothing here is a thrown, page-ending
+      // exception to salvage around (the call ran every query to completion and inspected
+      // every hit); it is a structural "this call could not confirm any coverage" fact, the
+      // same category fix round 2's stalled-queries case already reports this way, and using
+      // `partial` would additionally escalate the source's status away from `complete` for a
+      // condition that resolves itself as soon as Firebase does — see the report for the
+      // fuller comparison against `partial`.
+      if (confirmedThroughSec <= sinceSec) {
+        reasons.push(
+          `hackernews: ${transientFailureCount} hydration attempt(s) this call failed with a ` +
+            `non-200 status, and cost this call all of its forward progress — the boundary ` +
+            `held at ${sinceSec} rather than advance past them. These items will be retried ` +
+            `on a later call once Firebase is reachable again.`,
+        );
+      }
     }
 
     // Fix round 3, class 2: a schema rejection is deterministic, so it never retreats the

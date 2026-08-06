@@ -12,8 +12,17 @@
 import { describe, expect, it } from 'vitest';
 import { createNetClient, type Transport } from '../../../lib/net.js';
 import { NetworkError } from '../../../lib/errors.js';
+import type { Document } from '../../../lib/types.js';
 import { createHackerNewsAdapter } from '../../../sources/hackernews/adapter.js';
 import type { FetchPage } from '../../../sources/types.js';
+// `sources/registry.ts` and `ingest/index.ts` are each their module's declared public entry
+// point (CLAUDE.md's types.ts convention explicitly names both as fine to depend on) — used
+// here, not to unit-test the adapter's return value, but to drive the exact `runIngest` path
+// a real scheduled run takes (composer review, fix round 2: "prove it end to end, not at the
+// unit boundary — a unit test asserting the adapter returns an outcome does not prove the
+// operator ever sees it").
+import { createSourceRegistry } from '../../../sources/registry.js';
+import { runIngest } from '../../../ingest/index.js';
 import firebaseStory from '../../fixtures/hackernews/firebase-story.json' with { type: 'json' };
 import firebaseComment from '../../fixtures/hackernews/firebase-comment.json' with { type: 'json' };
 import firebaseDeleted from '../../fixtures/hackernews/firebase-deleted.json' with { type: 'json' };
@@ -763,10 +772,12 @@ describe('createHackerNewsAdapter', () => {
       // (the network-failure catch's coarser behaviour) or that forgets the `- 1` would both
       // produce a different number here.
       expect(first.cursor).toBe(String(sinceSec + 199));
-      // A lone transient failure does not by itself rise to a `runs`-row signal (composer
-      // resolution 1 only asks class 2 to "count and surface"; class 1's fix is the retry
-      // property proven below) — asserted so a regression that starts attaching an outcome
-      // here is visible.
+      // A transient failure that still leaves the window with genuine forward progress (the
+      // successful item at sinceSec+100 confirms up to sinceSec+199, well past sinceSec) does
+      // not rise to a `runs`-row signal — that is fix round 2's job (below), reserved for when
+      // transient failures cost a call *all* of its progress. Flagging every partial miss here
+      // would train an operator to ignore the field. Asserted so a regression that starts
+      // over-firing is visible.
       expect(first.outcome).toBeUndefined();
 
       // A later run, against a transport where 'forbidden' now hydrates cleanly, reaches it —
@@ -819,6 +830,10 @@ describe('createHackerNewsAdapter', () => {
       // A mutant that retreats to the *latest* failure (Math.max instead of Math.min) would
       // produce `sinceSec + 249` here instead — a distinctly different, wrong value.
       expect(page.cursor).toBe(String(sinceSec + 149));
+      // Two failures, not one, but the window still confirmed real progress (149 > 0) — fix
+      // round 2's zero-progress signal (below) must not fire just because more than one
+      // transient failure happened; only when they cost the call everything.
+      expect(page.outcome).toBeUndefined();
     });
 
     it('class 3 (filtered): never enters the malformed-shortfall ratio, even when it vastly outnumbers parseable attempts', async () => {
@@ -942,6 +957,121 @@ describe('createHackerNewsAdapter', () => {
       const numericFilters = new URL(algoliaCall ?? '').searchParams.get('numericFilters');
       expect(numericFilters).toBe(`created_at_i>=${boundarySec},created_at_i<=${NOW_SEC - 10}`);
       expect(page.documents).toHaveLength(1); // would be 0 pre-fix
+    });
+
+    describe('fix round 2 (composer review): a systemic transient-failure stall must not read as quiet', () => {
+      it('class 1: when transient failures cost the call all of its forward progress, it is reported as truncated', async () => {
+        const sinceSec = NOW_SEC - 3600;
+        // All three hits are the *earliest* items in the window and all three fail — nothing
+        // succeeds ahead of them to give the boundary anywhere to advance to. This is the
+        // shape a systemic Firebase outage or a URL-scheme change (every item 404s) produces.
+        const hits: FixtureHit[] = [
+          { objectID: 'a', created_at_i: sinceSec + 1 },
+          { objectID: 'b', created_at_i: sinceSec + 2 },
+          { objectID: 'c', created_at_i: sinceSec + 3 },
+        ];
+        const { adapter } = buildAdapter(
+          { hits, firebaseStatusOverrides: { a: 403, b: 404, c: 403 } },
+          { nowMs: NOW_MS },
+        );
+
+        const page = await adapter.fetchIncremental(undefined);
+
+        expect(page.documents).toEqual([]);
+        // Byte-for-byte what the pre-round-2 code produced on a genuinely quiet day (zero
+        // Algolia hits): `cursor: undefined`, no `outcome`. That collision is exactly the gap
+        // this round closes — without the assertion below, this page would be indistinguishable
+        // from "Hacker News was quiet" on the `runs` row.
+        expect(page.cursor).toBeUndefined();
+        expect(page.outcome?.kind).toBe('truncated');
+        if (page.outcome?.kind === 'truncated') {
+          expect(page.outcome.reason).toContain('3 hydration attempt(s)');
+        }
+      });
+
+      it('drives the all-transient scenario through runIngest and shows it on the literal runs row, distinct from a quiet day', async () => {
+        // Not a unit-boundary check: a mutant could leave the adapter reporting the right
+        // `FetchPage.outcome` while a bug in how the caller wires cursors/documents/runs still
+        // hides it from the row an operator actually reads. This drives the exact same
+        // `runIngest` path `scripts/ingest.ts`/`jobs/**` use, with in-memory fakes standing in
+        // for the Postgres-backed `DocumentSink`/`CursorStore`/`IngestRunRecorder` (ingest/repo.ts
+        // is the only place those touch a real database).
+        const sinceSec = NOW_SEC - 3600;
+        const hits: FixtureHit[] = [
+          { objectID: 'a', created_at_i: sinceSec + 1 },
+          { objectID: 'b', created_at_i: sinceSec + 2 },
+        ];
+        const { transport } = makeHackerNewsTransport({ hits, firebaseStatusOverrides: { a: 403, b: 404 } });
+        const netClient = createNetClient({
+          transport,
+          sleep: async () => undefined,
+          now: () => NOW_MS,
+          retry: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+        });
+        const adapter = createHackerNewsAdapter({
+          netClient,
+          now: () => NOW_MS,
+          hitsPerPage: 1000,
+          maxPagesPerQuery: 5,
+          indexLagBufferSeconds: 10,
+          initialLookbackSeconds: 3600,
+          queries: [''],
+        });
+        const registry = createSourceRegistry([adapter]);
+        const cursors = new Map<string, string>();
+        const inserted: Document[] = [];
+        const runOptions = {
+          registry,
+          documents: { insert: async (docs: readonly Document[]) => { inserted.push(...docs); return docs.length; } },
+          cursors: {
+            get: async (source: string) => cursors.get(source),
+            set: async (source: string, cursor: string) => {
+              cursors.set(source, cursor);
+            },
+          },
+          runs: { start: async () => 'run-outage', finish: async () => undefined },
+          now: () => new Date(NOW_MS),
+        };
+
+        const report = await runIngest(runOptions);
+        const hackernewsRow = report.counts.find((c) => c.source === 'hackernews');
+
+        // The literal `runs`-row shape an operator would see during the outage.
+        expect(report.status).toBe('COMPLETE');
+        expect(hackernewsRow?.status).toBe('complete');
+        expect(hackernewsRow?.fetched).toBe(0);
+        expect(hackernewsRow?.inserted).toBe(0);
+        expect(inserted).toEqual([]);
+        expect(hackernewsRow?.truncatedReasons).toHaveLength(1);
+        expect(hackernewsRow?.truncatedReasons[0]).toContain('2 hydration attempt(s)');
+        // The stall predicate must not fire here — nothing was handed back and re-attempted
+        // identically with a `partial` outcome; this is ordinary `exhausted` with a coverage
+        // fact riding along, ingest/orchestrator.ts's own two different things.
+        expect(hackernewsRow?.stopReason).toBe('exhausted');
+
+        // Same wiring, zero Algolia hits — a genuinely quiet day — to prove the two are
+        // actually distinguishable on the row, not just individually plausible.
+        const { transport: quietTransport } = makeHackerNewsTransport({ hits: [] });
+        const quietNetClient = createNetClient({ transport: quietTransport, sleep: async () => undefined, now: () => NOW_MS });
+        const quietAdapter = createHackerNewsAdapter({
+          netClient: quietNetClient,
+          now: () => NOW_MS,
+          queries: [''],
+        });
+        const quietReport = await runIngest({
+          ...runOptions,
+          registry: createSourceRegistry([quietAdapter]),
+          cursors: { get: async () => undefined, set: async () => undefined },
+          runs: { start: async () => 'run-quiet', finish: async () => undefined },
+        });
+        const quietRow = quietReport.counts.find((c) => c.source === 'hackernews');
+
+        expect(quietRow?.status).toBe('complete');
+        expect(quietRow?.fetched).toBe(0);
+        expect(quietRow?.truncatedReasons).toEqual([]);
+        // The only field that differs between the outage row and the quiet row.
+        expect(hackernewsRow?.truncatedReasons).not.toEqual(quietRow?.truncatedReasons);
+      });
     });
 
     describe('fetchBackfill: cursor and outcome are independent (SourceAdapter\'s own contract)', () => {
