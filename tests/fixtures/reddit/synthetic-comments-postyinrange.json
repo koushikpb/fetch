@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "Listing",
+    "data": { "children": [{ "kind": "t3", "data": { "id": "postyinrange", "name": "t3_postyinrange" } }] }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "cg1",
+            "name": "t1_cg1",
+            "author": "range_commenter",
+            "body": "Same here, still waiting on a real fix for this.",
+            "created_utc": 1749976500,
+            "score": 8,
+            "parent_id": "t3_postyinrange",
+            "link_id": "t3_postyinrange",
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]

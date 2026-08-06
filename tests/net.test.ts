@@ -5,7 +5,7 @@ import {
   netClient,
   type Transport,
 } from '../lib/net.js';
-import { NetworkError, RateLimitError, TimeoutError } from '../lib/errors.js';
+import { NetworkError, RateLimitError, TimeoutError, UpstreamError } from '../lib/errors.js';
 
 // A queue of canned responses/errors, one per call, so a test can script exactly what each
 // attempt sees (e.g. "500, then 500, then 200") without a real server.
@@ -444,11 +444,17 @@ describe('createNetClient', () => {
       await expect(client.request('https://example.com/x')).rejects.toThrow(RateLimitError);
     });
 
-    it('returns the final response, rather than throwing, when a 5xx persists through every retry', async () => {
-      // No class in lib/errors.ts's fixed taxonomy names "upstream 5xx after retries" the
-      // way RateLimitError names 429 — see the comment in lib/net.ts next to this branch.
-      // A 5xx that survives retries is returned like any other terminal HTTP response.
-      const transport: Transport = async () => new Response(null, { status: 503 });
+    it('throws UpstreamError, not RateLimitError, when a 5xx persists through every retry', async () => {
+      // Composer resolution (task-R-04-brief.md): net.ts throws when it gave up and returns
+      // a Response only when the server gave a definitive answer. An exhausted 5xx is this
+      // module giving up — see the comment in lib/net.ts next to this branch — so it must
+      // surface as a catchable error, the same way an exhausted 429 already does, rather
+      // than as a Response every caller has to remember to inspect.
+      const { transport, calls } = makeTransport([
+        new Response(null, { status: 503 }),
+        new Response(null, { status: 503 }),
+        new Response(null, { status: 503 }),
+      ]);
       const { sleep } = recordSleeps();
       const client = createNetClient({
         transport,
@@ -457,9 +463,19 @@ describe('createNetClient', () => {
         retry: { maxAttempts: 3, baseDelayMs: 10, maxDelayMs: 100 },
       });
 
-      const res = await client.request('https://example.com/x');
+      const err = await client.request('https://example.com/x').catch((e: unknown) => e);
 
-      expect(res.status).toBe(503);
+      expect(err).toBeInstanceOf(UpstreamError);
+      expect(err).not.toBeInstanceOf(RateLimitError);
+      expect((err as UpstreamError).context).toMatchObject({
+        host: 'example.com',
+        path: '/x',
+        attempt: 3,
+        status: 503,
+      });
+      // Retry counts are unchanged by this task: still exactly maxAttempts calls before
+      // giving up, whether giving up now throws or (as before) returned a Response.
+      expect(calls).toHaveLength(3);
     });
   });
 

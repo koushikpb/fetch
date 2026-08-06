@@ -1,0 +1,66 @@
+{
+  "feed": {
+    "author": {
+      "name": {
+        "label": "iTunes Store"
+      },
+      "uri": {
+        "label": "http://www.apple.com/itunes/"
+      }
+    },
+    "updated": {
+      "label": "2026-08-05T03:23:14-07:00"
+    },
+    "rights": {
+      "label": "Copyright 2008 Apple Inc."
+    },
+    "title": {
+      "label": "iTunes Store: Customer Reviews"
+    },
+    "icon": {
+      "label": "http://itunes.apple.com/favicon.ico"
+    },
+    "link": [
+      {
+        "attributes": {
+          "rel": "alternate",
+          "type": "text/html",
+          "href": "https://music.apple.com/WebObjects/MZStore.woa/wa/viewGrouping?cc=us&id=1"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "self",
+          "href": "https://itunes.apple.com/us/rss/customerreviews/id=999999999999/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "first",
+          "href": ""
+        }
+      },
+      {
+        "attributes": {
+          "rel": "last",
+          "href": ""
+        }
+      },
+      {
+        "attributes": {
+          "rel": "previous",
+          "href": ""
+        }
+      },
+      {
+        "attributes": {
+          "rel": "next",
+          "href": ""
+        }
+      }
+    ],
+    "id": {
+      "label": "https://itunes.apple.com/us/rss/customerreviews/id=999999999999/sortby=mostrecent/json"
+    }
+  }
+}

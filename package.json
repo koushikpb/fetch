@@ -15,7 +15,12 @@
     "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm cost:project",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx --env-file=.env scripts/db-migrate.ts",
+    "db:seed": "tsx --env-file=.env scripts/db-seed.ts",
+    "ingest": "tsx --env-file=.env scripts/ingest.ts",
+    "worker": "tsx --env-file=.env scripts/worker.ts",
+    "smoke": "tsx --env-file=.env smoke.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
@@ -24,6 +29,7 @@
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.6",
+    "tsx": "^4.23.5",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
@@ -32,6 +38,7 @@
     "@anthropic-ai/sdk": "^0.115.0",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.22.0",
+    "pg-boss": "^12.27.0",
     "zod": "^4.4.3"
   }
 }

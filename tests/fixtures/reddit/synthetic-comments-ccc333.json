@@ -1,0 +1,41 @@
+[
+  {
+    "kind": "Listing",
+    "data": { "children": [{ "kind": "t3", "data": { "id": "ccc333", "name": "t3_ccc333" } }] }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "ce1",
+            "name": "t1_ce1",
+            "author": "opsgenie_refugee",
+            "body": "We just use a shared calendar and a phone tree. Embarrassing but every tool in this space is built for orgs 10x our size.",
+            "created_utc": 1739612000,
+            "score": 54,
+            "parent_id": "t3_ccc333",
+            "link_id": "t3_ccc333",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "ce2",
+            "name": "t1_ce2",
+            "author": "[deleted]",
+            "body": "Grafana OnCall is free and open source, worth a look.",
+            "created_utc": 1739612100,
+            "score": 22,
+            "parent_id": "t3_ccc333",
+            "link_id": "t3_ccc333",
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]

@@ -185,6 +185,136 @@ describe('Reddit trio (all-or-nothing)', () => {
   });
 });
 
+// I-05 composer resolution 2: the registry became config-aware, so lib/config.ts grew the
+// settings the three adapters need. The governing rule for all of them is that `undefined`
+// means "not configured" and leaves the adapter's own default in force — this file never
+// restates an adapter default, so the two cannot drift apart.
+describe('adapter settings (I-05)', () => {
+  const REDDIT_CREDENTIALS = {
+    REDDIT_CLIENT_ID: 'id',
+    REDDIT_CLIENT_SECRET: 'secret',
+    REDDIT_USER_AGENT: 'ua',
+  };
+
+  it('leaves every adapter setting undefined when nothing is configured', () => {
+    const config = loadConfig(MINIMAL_VALID_ENV);
+    expect(config.hackernews.queries).toBeUndefined();
+    expect(config.appstore.appIds).toBeUndefined();
+    expect(config.appstore.territories).toBeUndefined();
+  });
+
+  it('parses comma-separated lists, trimming whitespace and dropping empty entries', () => {
+    const config = loadConfig({
+      ...MINIMAL_VALID_ENV,
+      HN_QUERIES: 'postgres, pgvector ,,',
+      APPSTORE_APP_IDS: '284910350,570060128',
+      APPSTORE_TERRITORIES: ' us , gb ',
+    });
+    expect(config.hackernews.queries).toEqual(['postgres', 'pgvector']);
+    expect(config.appstore.appIds).toEqual(['284910350', '570060128']);
+    expect(config.appstore.territories).toEqual(['us', 'gb']);
+  });
+
+  it('treats an empty or separator-only list as unconfigured rather than as an empty sweep', () => {
+    const config = loadConfig({ ...MINIMAL_VALID_ENV, HN_QUERIES: ' , , ' });
+    expect(config.hackernews.queries).toBeUndefined();
+  });
+
+  it('carries Reddit’s subreddits and comment threshold alongside its credentials', () => {
+    const config = loadConfig({
+      ...MINIMAL_VALID_ENV,
+      ...REDDIT_CREDENTIALS,
+      REDDIT_SUBREDDITS: 'selfhosted,smallbusiness',
+      REDDIT_MIN_COMMENTS_TO_EXPAND: '12',
+    });
+    expect(config.reddit?.subreddits).toEqual(['selfhosted', 'smallbusiness']);
+    expect(config.reddit?.minCommentsToExpand).toBe(12);
+  });
+
+  // Fix round 1, Finding 5: Reddit settings without Reddit credentials used to be a boot
+  // error, which took Hacker News and App Store ingestion down with it over a setting that
+  // affects neither. It is a warning now — the run row already records the Reddit skip and
+  // its reason, so the information was never actually lost.
+  it('does not reject Reddit settings configured without credentials', () => {
+    const config = loadConfig({
+      ...MINIMAL_VALID_ENV,
+      REDDIT_SUBREDDITS: 'selfhosted',
+      REDDIT_MIN_COMMENTS_TO_EXPAND: '5',
+    });
+    expect(config.reddit).toBeUndefined();
+    // The other two sources are entirely unaffected, which is the whole point of relaxing it.
+    expect(config.databaseUrl).toBe(MINIMAL_VALID_ENV.DATABASE_URL);
+  });
+
+  it('warns at boot — naming the variables, never their values — when they cannot be used', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://stub:stub@localhost:5432/stub_db');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'stub-anthropic-key');
+    vi.stubEnv('REDDIT_SUBREDDITS', 'selfhosted,smallbusiness');
+    vi.stubEnv('REDDIT_CLIENT_ID', undefined);
+    vi.stubEnv('REDDIT_CLIENT_SECRET', undefined);
+    vi.stubEnv('REDDIT_USER_AGENT', undefined);
+
+    const capture = captureStdoutWrites();
+    const config = bootConfig();
+    capture.restore();
+
+    expect(config.reddit).toBeUndefined();
+    const written = capture.text();
+    expect(written).toContain('REDDIT_SUBREDDITS');
+    expect(written).toContain('"level":"warn"');
+    // Names, not values — REDDIT_SUBREDDITS is not itself a secret but it sits beside two
+    // that are, and the boot path should not start printing env values.
+    expect(written).not.toContain('smallbusiness');
+    vi.unstubAllEnvs();
+  });
+
+  it('stays silent at boot when the settings are usable', () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://stub:stub@localhost:5432/stub_db');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'stub-anthropic-key');
+    vi.stubEnv('REDDIT_SUBREDDITS', 'selfhosted');
+    vi.stubEnv('REDDIT_CLIENT_ID', 'id');
+    vi.stubEnv('REDDIT_CLIENT_SECRET', 'secret');
+    vi.stubEnv('REDDIT_USER_AGENT', 'ua');
+
+    const capture = captureStdoutWrites();
+    bootConfig();
+    capture.restore();
+
+    expect(capture.text()).toBe('');
+    vi.unstubAllEnvs();
+  });
+
+  it('keeps loadConfig pure — no warning is written when it is called directly', () => {
+    // The warning lives in `bootConfig`, not the validator: `loadConfig` is documented as
+    // safe to call with a literal object in tests, and a validator that writes to stdout
+    // would not be.
+    const capture = captureStdoutWrites();
+    loadConfig({ ...MINIMAL_VALID_ENV, REDDIT_SUBREDDITS: 'selfhosted' });
+    capture.restore();
+    expect(capture.text()).toBe('');
+  });
+
+  it('rejects a non-integer or negative REDDIT_MIN_COMMENTS_TO_EXPAND', () => {
+    for (const value of ['not-a-number', '-1', '2.5']) {
+      expect(() =>
+        loadConfig({
+          ...MINIMAL_VALID_ENV,
+          ...REDDIT_CREDENTIALS,
+          REDDIT_MIN_COMMENTS_TO_EXPAND: value,
+        }),
+      ).toThrow(/REDDIT_MIN_COMMENTS_TO_EXPAND must be a non-negative integer/);
+    }
+  });
+
+  it('keeps the adapter settings enumerable — they are configuration, not credentials', () => {
+    // The counterpart to the redaction tests below: `hackernews` and `appstore` hold no
+    // secret, so a `{...config}` log line should still carry them.
+    const spread = { ...loadConfig({ ...MINIMAL_VALID_ENV, HN_QUERIES: 'postgres' }) };
+    expect(spread.hackernews.queries).toEqual(['postgres']);
+    expect(Object.keys(spread)).toContain('appstore');
+  });
+});
+
 describe('BUDGET_CEILING_USD, LOG_LEVEL, NODE_ENV', () => {
   it('defaults BUDGET_CEILING_USD to 70 (CLAUDE.md cost envelope)', () => {
     expect(loadConfig(MINIMAL_VALID_ENV).budgetCeilingUsd).toBe(70);

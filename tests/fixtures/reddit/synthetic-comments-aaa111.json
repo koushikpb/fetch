@@ -1,0 +1,179 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "aaa111",
+            "name": "t3_aaa111",
+            "title": "Anyone found a decent multi-bank subscription tracker?",
+            "selftext": "I've tried three apps and none of them handle more than one primary bank account well.",
+            "author": "three_banks_no_luck",
+            "created_utc": 1736460600,
+            "score": 340,
+            "num_comments": 6,
+            "upvote_ratio": 0.94,
+            "subreddit": "testsub",
+            "permalink": "/r/testsub/comments/aaa111/anyone_found_a_decent_multibank_subscription/"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "cm1",
+            "name": "t1_cm1",
+            "author": "spreadsheet_survivor",
+            "body": "Gave up and built my own spreadsheet with Plaid's API directly.",
+            "created_utc": 1736461000,
+            "score": 89,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "id": "cm1a",
+                      "name": "t1_cm1a",
+                      "author": "three_banks_no_luck",
+                      "body": "How long did the Plaid integration take you to get right?",
+                      "created_utc": 1736461200,
+                      "score": 14,
+                      "parent_id": "t1_cm1",
+                      "link_id": "t3_aaa111",
+                      "replies": {
+                        "kind": "Listing",
+                        "data": {
+                          "children": [
+                            {
+                              "kind": "t1",
+                              "data": {
+                                "id": "cm1a1",
+                                "name": "t1_cm1a1",
+                                "author": "spreadsheet_survivor",
+                                "body": "About a weekend, most of it fighting the sandbox mode.",
+                                "created_utc": 1736461400,
+                                "score": 5,
+                                "parent_id": "t1_cm1a",
+                                "link_id": "t3_aaa111",
+                                "replies": ""
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c2",
+            "name": "t1_c2",
+            "author": "second_commenter",
+            "body": "Same problem here, subscribed to this thread.",
+            "created_utc": 1736461500,
+            "score": 40,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c3",
+            "name": "t1_c3",
+            "author": "third_commenter",
+            "body": "Try Copilot Money, it handled 3 banks fine for me.",
+            "created_utc": 1736461600,
+            "score": 33,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c4",
+            "name": "t1_c4",
+            "author": "fourth_commenter",
+            "body": "Rocket Money added multi-bank support recently, might be worth another look.",
+            "created_utc": 1736461700,
+            "score": 21,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c5",
+            "name": "t1_c5",
+            "author": "fifth_commenter",
+            "body": "This is exactly the gap I keep running into as well.",
+            "created_utc": 1736461800,
+            "score": 18,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c6",
+            "name": "t1_c6",
+            "author": "sixth_commenter",
+            "body": "This comment is beyond the configured breadth and must not appear in output.",
+            "created_utc": 1736461900,
+            "score": 9,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c7",
+            "name": "t1_c7",
+            "author": "seventh_commenter",
+            "body": "Also beyond the configured breadth and must not appear in output.",
+            "created_utc": 1736462000,
+            "score": 4,
+            "parent_id": "t3_aaa111",
+            "link_id": "t3_aaa111",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "more",
+          "data": {
+            "id": "more1",
+            "name": "t1_more1",
+            "count": 12,
+            "children": ["c8", "c9"]
+          }
+        }
+      ]
+    }
+  }
+]

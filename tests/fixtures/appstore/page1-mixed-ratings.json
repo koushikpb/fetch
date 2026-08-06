@@ -1,0 +1,318 @@
+{
+  "feed": {
+    "author": {
+      "name": {
+        "label": "iTunes Store"
+      },
+      "uri": {
+        "label": "http://www.apple.com/itunes/"
+      }
+    },
+    "entry": [
+      {
+        "author": {
+          "uri": {
+            "label": "https://itunes.apple.com/us/reviews/id900000001"
+          },
+          "name": {
+            "label": "happy_yelp_regular"
+          },
+          "label": ""
+        },
+        "updated": {
+          "label": "2026-08-03T20:15:39-07:00"
+        },
+        "im:rating": {
+          "label": "5"
+        },
+        "im:version": {
+          "label": "26.32.0"
+        },
+        "id": {
+          "label": "14385228506"
+        },
+        "title": {
+          "label": "Yelp"
+        },
+        "content": {
+          "label": "Excellent resource for information.",
+          "attributes": {
+            "type": "text"
+          }
+        },
+        "link": {
+          "attributes": {
+            "rel": "related",
+            "href": "https://itunes.apple.com/us/review?id=284910350&type=Purple%20Software"
+          }
+        },
+        "im:voteSum": {
+          "label": "0"
+        },
+        "im:contentType": {
+          "attributes": {
+            "term": "Application",
+            "label": "Application"
+          }
+        },
+        "im:voteCount": {
+          "label": "0"
+        }
+      },
+      {
+        "author": {
+          "uri": {
+            "label": "https://itunes.apple.com/us/reviews/id900000002"
+          },
+          "name": {
+            "label": "furniture_still_stuck"
+          },
+          "label": ""
+        },
+        "updated": {
+          "label": "2026-08-03T18:59:33-07:00"
+        },
+        "im:rating": {
+          "label": "1"
+        },
+        "im:version": {
+          "label": "26.32.0"
+        },
+        "id": {
+          "label": "14385023455"
+        },
+        "title": {
+          "label": "Menards Moving & Storage"
+        },
+        "content": {
+          "label": "We called and contracted them for our move from the Bronx to Florida.  They in turn gave the move to a third party that we did not know Good View.  They said that Menards low balled the amount of the move.  We agreed to the new amount.  We are still waiting for our furniture.  We do not  get a straight answer from either moving company and our furniture is still in NJ waiting on a truck to be available",
+          "attributes": {
+            "type": "text"
+          }
+        },
+        "link": {
+          "attributes": {
+            "rel": "related",
+            "href": "https://itunes.apple.com/us/review?id=284910350&type=Purple%20Software"
+          }
+        },
+        "im:voteSum": {
+          "label": "0"
+        },
+        "im:contentType": {
+          "attributes": {
+            "term": "Application",
+            "label": "Application"
+          }
+        },
+        "im:voteCount": {
+          "label": "0"
+        }
+      },
+      {
+        "author": {
+          "uri": {
+            "label": "https://itunes.apple.com/us/reviews/id900000003"
+          },
+          "name": {
+            "label": "undecided_diner"
+          },
+          "label": ""
+        },
+        "updated": {
+          "label": "2026-08-02T09:41:58-07:00"
+        },
+        "im:rating": {
+          "label": "2"
+        },
+        "im:version": {
+          "label": "26.31.0"
+        },
+        "id": {
+          "label": "14379340374"
+        },
+        "title": {
+          "label": "A review source"
+        },
+        "content": {
+          "label": "If you’re deciding between two options or picking a local restaurant, this is the website to go to.",
+          "attributes": {
+            "type": "text"
+          }
+        },
+        "link": {
+          "attributes": {
+            "rel": "related",
+            "href": "https://itunes.apple.com/us/review?id=284910350&type=Purple%20Software"
+          }
+        },
+        "im:voteSum": {
+          "label": "0"
+        },
+        "im:contentType": {
+          "attributes": {
+            "term": "Application",
+            "label": "Application"
+          }
+        },
+        "im:voteCount": {
+          "label": "0"
+        }
+      },
+      {
+        "author": {
+          "uri": {
+            "label": "https://itunes.apple.com/us/reviews/id900000004"
+          },
+          "name": {
+            "label": "stale_reviews_critic"
+          },
+          "label": ""
+        },
+        "updated": {
+          "label": "2026-08-03T04:04:25-07:00"
+        },
+        "im:rating": {
+          "label": "3"
+        },
+        "im:version": {
+          "label": "26.31.0"
+        },
+        "id": {
+          "label": "14382261553"
+        },
+        "title": {
+          "label": "Why?"
+        },
+        "content": {
+          "label": "Pictures and reviews  that are over 6 months old are useless.   Why not remove them and old ratings. No wonder you can’t trust the reviews anymore.",
+          "attributes": {
+            "type": "text"
+          }
+        },
+        "link": {
+          "attributes": {
+            "rel": "related",
+            "href": "https://itunes.apple.com/us/review?id=284910350&type=Purple%20Software"
+          }
+        },
+        "im:voteSum": {
+          "label": "0"
+        },
+        "im:contentType": {
+          "attributes": {
+            "term": "Application",
+            "label": "Application"
+          }
+        },
+        "im:voteCount": {
+          "label": "0"
+        }
+      },
+      {
+        "author": {
+          "uri": {
+            "label": "https://itunes.apple.com/us/reviews/id900000005"
+          },
+          "name": {
+            "label": "happy_bevmo_shopper"
+          },
+          "label": ""
+        },
+        "updated": {
+          "label": "2026-08-03T14:05:49-07:00"
+        },
+        "im:rating": {
+          "label": "4"
+        },
+        "im:version": {
+          "label": "26.32.0"
+        },
+        "id": {
+          "label": "14384236478"
+        },
+        "title": {
+          "label": "BevMo South Lake Tahoe California"
+        },
+        "content": {
+          "label": "Great store, great prices, great employees ,,the staff is awesome !!",
+          "attributes": {
+            "type": "text"
+          }
+        },
+        "link": {
+          "attributes": {
+            "rel": "related",
+            "href": "https://itunes.apple.com/us/review?id=284910350&type=Purple%20Software"
+          }
+        },
+        "im:voteSum": {
+          "label": "0"
+        },
+        "im:contentType": {
+          "attributes": {
+            "term": "Application",
+            "label": "Application"
+          }
+        },
+        "im:voteCount": {
+          "label": "0"
+        }
+      }
+    ],
+    "updated": {
+      "label": "2026-08-05T03:22:49-07:00"
+    },
+    "rights": {
+      "label": "Copyright 2008 Apple Inc."
+    },
+    "title": {
+      "label": "iTunes Store: Customer Reviews"
+    },
+    "icon": {
+      "label": "http://itunes.apple.com/favicon.ico"
+    },
+    "link": [
+      {
+        "attributes": {
+          "rel": "alternate",
+          "type": "text/html",
+          "href": "https://music.apple.com/WebObjects/MZStore.woa/wa/viewGrouping?cc=us&id=1"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "self",
+          "href": "https://itunes.apple.com/us/rss/customerreviews/id=284910350/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "first",
+          "href": "https://itunes.apple.com/us/rss/customerreviews/page=1/id=284910350/sortby=mostrecent/xml?urlDesc=/customerreviews/id=284910350/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "last",
+          "href": "https://itunes.apple.com/us/rss/customerreviews/page=10/id=284910350/sortby=mostrecent/xml?urlDesc=/customerreviews/id=284910350/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "previous",
+          "href": "https://itunes.apple.com/us/rss/customerreviews/page=1/id=284910350/sortby=mostrecent/xml?urlDesc=/customerreviews/id=284910350/sortby=mostrecent/json"
+        }
+      },
+      {
+        "attributes": {
+          "rel": "next",
+          "href": "https://itunes.apple.com/us/rss/customerreviews/page=2/id=284910350/sortby=mostrecent/xml?urlDesc=/customerreviews/id=284910350/sortby=mostrecent/json"
+        }
+      }
+    ],
+    "id": {
+      "label": "https://itunes.apple.com/us/rss/customerreviews/id=284910350/sortby=mostrecent/json"
+    }
+  }
+}
